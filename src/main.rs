@@ -1,6 +1,8 @@
 //! 構成図の窓（Rust 版）。中身は board.py が書く ~/.herdr/kanban-state.json の "arch"（判断は arch.py）。ここは読んで描くだけ。
 //!
-//!   arch-view                         窓を開く
+//!   arch-view                         窓を開く（範囲は herdr で今選んでいるペインのプロジェクト。リポジトリでなければ全体）
+//!   arch-view <project>|all           その範囲のタブで開く
+//! すでに開いていれば、開いている窓に「そのプロジェクトのタブを足して前に出て」と知らせて終わる（窓は増やさない）。
 //!   arch-view --dump-layout <out> [aspect] [段の上限]   並べた結果を JSON で書く（段の上限 1 なら Python の layout と同じ答え）
 //!
 //! 環境変数 ARCH_BENCH=<書き出す先> を付けると、図を 1 画素ずつ動かしながら 180 回描き直し、
@@ -13,6 +15,7 @@ mod draw;
 mod layout;
 mod model;
 mod side;
+mod win;
 
 use layout::Layout;
 use model::{State, View};
@@ -50,12 +53,24 @@ fn main() {
         std::fs::write(out, body).expect("書き出せない");
         return;
     }
-    run();
+    let fixed = args.get(1).filter(|a| !a.starts_with("--")).cloned();
+    let repos = || model::load_state().ok().and_then(|s| s.arch).map(|a| a.repos).unwrap_or_default();
+    // 今選んでいるペインの範囲（リポジトリならそのプロジェクト・並べたフォルダなら全体・関係ないフォルダなら無し）
+    let focused = || win::focused_cwd().and_then(|c| model::project_of(&c, &repos()));
+    let Some(listener) = win::claim(|| focused().map_or("show".to_string(), |s| format!("open:{s}"))) else {
+        return; // もう開いている（知らせは送った）
+    };
+    let scope = match fixed.as_deref() {
+        Some("all") => String::new(),
+        Some(p) => p.to_string(),
+        None => focused().unwrap_or_default(),
+    };
+    run(scope, listener);
 }
 
 /// CPU で描く（既定）。GPU のドライバーを読み込まないので、空の窓が約 13 MB（GPU 版は約 97 MB・2026-10-06 に測った）
 #[cfg(feature = "cpu")]
-fn run() {
+fn run(scope: String, listener: std::net::TcpListener) {
     use egui_software_backend::{SoftwareBackend, SoftwareBackendAppConfiguration};
 
     struct Cpu(Viewer);
@@ -67,14 +82,14 @@ fn run() {
     let settings = SoftwareBackendAppConfiguration::new().inner_size(Some(egui::vec2(960.0, 600.0))).title(Some("構成図".into()));
     egui_software_backend::run_app_with_software_backend(settings, |ctx: egui::Context| {
         draw::setup_fonts(&ctx);
-        Cpu(Viewer::new(ctx))
+        Cpu(Viewer::new(ctx, scope.clone(), Some(listener.try_clone().expect("口を写せない"))))
     })
     .expect("窓を作れない");
 }
 
 /// GPU で描く（eframe + glow）
 #[cfg(all(feature = "gpu", not(feature = "cpu")))]
-fn run() {
+fn run(scope: String, listener: std::net::TcpListener) {
     struct Gpu(Viewer);
     impl eframe::App for Gpu {
         fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -90,7 +105,7 @@ fn run() {
         options,
         Box::new(|cc| {
             draw::setup_fonts(&cc.egui_ctx);
-            Ok(Box::new(Gpu(Viewer::new(cc.egui_ctx.clone()))))
+            Ok(Box::new(Gpu(Viewer::new(cc.egui_ctx.clone(), scope, Some(listener)))))
         }),
     )
     .expect("窓を作れない");
@@ -126,6 +141,21 @@ struct Bench {
     out: String,
     last: Option<Instant>,
     times: Vec<f64>,
+}
+
+/// タブ（範囲ごと）。見ていた場所を覚えておき、戻ったら同じ場所から
+#[derive(Default)]
+struct Tab {
+    /// プロジェクト名。空なら全体
+    scope: String,
+    cam: Option<draw::Camera>,
+    moved: bool,
+    selected: Option<String>,
+    bundle: Option<usize>,
+    flow: Option<usize>,
+    picked: Option<String>,
+    view: Option<View>,
+    lay: Option<Layout>,
 }
 
 /// 図の上の、押した・乗せた所にあるもの
@@ -175,10 +205,23 @@ struct Viewer {
     picked: Option<String>,
     /// 図を描いている所（骨格をたどるときに、部品が見えているかを調べる）
     canvas: egui::Rect,
+    /// 今のタブの範囲（プロジェクト名、空なら全体）。ほかのタブは tabs に覚えておく（今のタブの中身は self の欄が正）
+    scope: String,
+    tabs: Vec<Tab>,
+    cur: usize,
+    /// 2 つ目を開こうとしたときの知らせの受け口
+    inbox: Option<mpsc::Receiver<win::Msg>>,
+    /// 開いてから少し待って前に出す時刻（裏から立てた窓は Windows が前に出さない）
+    front_at: Option<Instant>,
 }
 
 impl Viewer {
-    fn new(ctx: egui::Context) -> Self {
+    fn new(ctx: egui::Context, scope: String, listener: Option<std::net::TcpListener>) -> Self {
+        let inbox = listener.map(|l| {
+            let (tx, rx) = mpsc::channel();
+            win::listen(l, tx, ctx.clone());
+            rx
+        });
         let bench = std::env::var("ARCH_BENCH").ok().map(|out| Bench { out, last: None, times: vec![] });
         let mut v = Viewer {
             state: None,
@@ -207,12 +250,17 @@ impl Viewer {
             playing: None,
             picked: None,
             canvas: egui::Rect::NOTHING,
+            tabs: vec![Tab { scope: scope.clone(), ..Default::default() }],
+            scope,
+            cur: 0,
+            inbox,
+            front_at: Some(Instant::now() + std::time::Duration::from_millis(300)),
         };
         match model::load_state() {
             Ok(st) => {
                 match &st.arch {
                     Some(a) => {
-                        v.view = Some(model::view_all(a, None));
+                        v.view = Some(model::view_for(a, &v.scope, None));
                         v.msg = "並べている".into();
                     }
                     None => v.msg = "構成図の宣言が無い（~/.herdr/kanban-data/<project>/arch.json）".into(),
@@ -250,6 +298,28 @@ impl Viewer {
         }
         self.poll();
         ctx.request_repaint_after(POLL); // 何も触っていなくても、state を見に行けるように
+        let msgs: Vec<win::Msg> = self.inbox.as_ref().map(|rx| rx.try_iter().collect()).unwrap_or_default();
+        for m in msgs {
+            if let win::Msg::Open(scope) = m {
+                self.open_tab(scope); // 2 回目に押されたら: そのプロジェクトのタブを足す（あれば切り替える）
+            }
+            self.front_at = Some(Instant::now());
+        }
+        if let Some(at) = self.front_at {
+            if Instant::now() >= at {
+                win::bring_front();
+                self.front_at = None;
+            } else {
+                ctx.request_repaint_after(at - Instant::now());
+            }
+        }
+        let (next_tab, close_tab) = ui.input_mut(|i| (i.consume_key(egui::Modifiers::CTRL, egui::Key::Tab), i.consume_key(egui::Modifiers::CTRL, egui::Key::W)));
+        if next_tab {
+            self.switch((self.cur + 1) % self.tabs.len());
+        }
+        if close_tab {
+            self.close_tab(self.cur);
+        }
         if let Some(rx) = &self.pending {
             if let Ok((view, r)) = rx.try_recv() {
                 match r {
@@ -268,7 +338,8 @@ impl Viewer {
         let p = ui.painter().clone();
         // 下の帯（窓の幅いっぱい）: ウォーキングスケルトンを通る順に部品を並べ、どこまで本番で通ったかを一目で見せる
         let strip = egui::Rect::from_min_max(egui::pos2(area.min.x, area.max.y - draw::STRIP_H), area.max);
-        let body = egui::Rect::from_min_max(area.min + egui::vec2(0.0, draw::HEAD_H), egui::pos2(area.max.x, strip.min.y));
+        let tabbar = egui::Rect::from_min_size(area.min + egui::vec2(0.0, draw::HEAD_H), egui::vec2(area.width(), draw::TAB_H));
+        let body = egui::Rect::from_min_max(egui::pos2(area.min.x, tabbar.max.y), egui::pos2(area.max.x, strip.min.y));
         draw::paper(&p, body);
         let keys = ui.input(|i| {
             use egui::Key;
@@ -365,6 +436,7 @@ impl Viewer {
             draw::diagram(&p.with_clip_rect(body), view, lay, changes, &shown, &focus);
         }
         self.strip(ui, &p, strip);
+        self.tabbar(ui, &p, tabbar);
         if side_open {
             self.side_panel(ui, body);
         }
@@ -378,7 +450,8 @@ impl Viewer {
             }
             _ => self.msg.clone(),
         };
-        draw::header(&p, area, "構成図 — 全体", "押すと詳しく　f 全体　s 骨格だけ　← → 骨格をたどる　r 更新", &meta);
+        let title = if self.scope.is_empty() { "構成図 — 全体".to_string() } else { format!("構成図 — {} とつながる部品", self.scope) };
+        draw::header(&p, area, &title, "押すと詳しく　f 全体　s 骨格だけ　← → 骨格をたどる　r 更新", &meta);
         self.bench_tick(&ctx, body);
     }
 
@@ -403,9 +476,7 @@ impl Viewer {
                 let i = view.owners.iter().position(|o| Some(o) == view.owner.as_ref()).map_or(0, |i| (i + 1) % view.owners.len());
                 self.picked = view.owners.get(i).cloned();
                 self.flow = None;
-                if let Some(a) = self.state.as_ref().and_then(|st| st.arch.as_ref()) {
-                    self.view = Some(model::view_all(a, self.picked.as_deref())); // 骨格の番号だけ変わる（並べ方はそのまま）
-                }
+                self.rebuild(); // 骨格の番号だけ変わる（並べ方はそのまま）
             }
             Some(draw::StripHit::Node(id)) => {
                 let id = id.clone();
@@ -514,7 +585,7 @@ impl Viewer {
     fn start_layout(&mut self, view: View) {
         let (tx, rx) = mpsc::channel();
         let ctx = self.ctx.clone();
-        let aspect = (self.size.x / (self.size.y - draw::HEAD_H - draw::STRIP_H)) as f64;
+        let aspect = (self.size.x / (self.size.y - draw::HEAD_H - draw::TAB_H - draw::STRIP_H)) as f64;
         std::thread::spawn(move || {
             let lay = layout::layout(&view, aspect, MAX_ROWS);
             let _ = tx.send((view, lay));
@@ -538,24 +609,107 @@ impl Viewer {
         self.state_mtime = mtime;
         match model::load_state() {
             Ok(st) => {
-                if let Some(a) = &st.arch {
-                    let view = model::view_all(a, self.picked.as_deref());
-                    let same = self.pending.is_none() && self.lay.is_some() && self.view.as_ref().is_some_and(|v| shape(v) == shape(&view));
-                    if same {
-                        self.view = Some(view);
-                        self.forget_missing();
-                    } else if self.zoomed {
-                        self.start_layout(view);
-                    } else {
-                        self.view = Some(view); // 窓の大きさが決まったら並べる
-                    }
-                }
                 self.state = Some(st);
+                self.rebuild();
                 if self.msg.starts_with("読めない") {
                     self.msg.clear();
                 }
             }
             Err(e) => self.msg = format!("読めない: {e}"), // 描けなくても閉じない。次の回にやり直す
+        }
+    }
+
+    /// 今のタブの中身を、最新の state から作り直す。並べ方が変わっていなければ描き直すだけ
+    fn rebuild(&mut self) {
+        let Some(a) = self.state.as_ref().and_then(|s| s.arch.as_ref()) else { return };
+        let view = model::view_for(a, &self.scope, self.picked.as_deref());
+        let same = self.pending.is_none() && self.lay.is_some() && self.view.as_ref().is_some_and(|v| shape(v) == shape(&view));
+        if same {
+            self.view = Some(view);
+            self.forget_missing();
+        } else if self.zoomed {
+            self.start_layout(view);
+        } else {
+            self.view = Some(view); // 窓の大きさが決まったら並べる
+        }
+    }
+
+    /// 今のタブの見ていた場所を覚える
+    fn save_tab(&mut self) {
+        self.tabs[self.cur] = Tab {
+            scope: self.scope.clone(),
+            cam: self.cam,
+            moved: self.moved,
+            selected: self.selected.take(),
+            bundle: self.bundle.take(),
+            flow: self.flow.take(),
+            picked: self.picked.take(),
+            view: self.view.take(),
+            lay: self.lay.take(),
+        };
+    }
+
+    /// タブ i の見ていた場所を取り出して描く（今のタブを覚えるのは呼ぶ側）
+    fn load(&mut self, i: usize) {
+        self.cur = i;
+        let t = std::mem::take(&mut self.tabs[i]);
+        self.tabs[i].scope = t.scope.clone();
+        (self.scope, self.cam, self.moved, self.selected, self.bundle) = (t.scope, t.cam, t.moved, t.selected, t.bundle);
+        (self.flow, self.picked, self.view, self.lay) = (t.flow, t.picked, t.view, t.lay);
+        (self.hover_node, self.hover_edge, self.playing, self.pending) = (None, None, None, None);
+        self.rebuild(); // 中身は最新の state で
+    }
+
+    /// タブを切り替える。見ていた場所は覚えておき、戻ったら同じ場所から
+    fn switch(&mut self, i: usize) {
+        if i == self.cur || i >= self.tabs.len() {
+            return;
+        }
+        self.save_tab();
+        self.load(i);
+    }
+
+    /// その範囲のタブへ切り替える。無ければ足す（prefix+o を押すたびに、今のプロジェクトをタブとして残せる）
+    fn open_tab(&mut self, scope: String) {
+        if let Some(i) = self.tabs.iter().enumerate().position(|(i, t)| (if i == self.cur { &self.scope } else { &t.scope }) == &scope) {
+            return self.switch(i);
+        }
+        self.save_tab();
+        self.tabs.push(Tab { scope, ..Default::default() });
+        self.load(self.tabs.len() - 1);
+    }
+
+    /// タブを閉じる。最後の 1 枚は閉じない。今のタブを閉じたら、となりのタブへ
+    fn close_tab(&mut self, i: usize) {
+        if self.tabs.len() == 1 || i >= self.tabs.len() {
+            return;
+        }
+        if i == self.cur {
+            self.tabs.remove(i);
+            self.load(i.min(self.tabs.len() - 1));
+        } else {
+            self.tabs.remove(i);
+            if i < self.cur {
+                self.cur -= 1;
+            }
+        }
+    }
+
+    /// タブの帯を描き、押されたら切り替える・閉じる
+    fn tabbar(&mut self, ui: &mut egui::Ui, p: &egui::Painter, r: egui::Rect) {
+        let names: Vec<String> = self.tabs.iter().enumerate().map(|(i, t)| if i == self.cur { self.scope.clone() } else { t.scope.clone() }).collect();
+        let hits = draw::tabbar(p, r, &names, self.cur);
+        let resp = ui.interact(r, egui::Id::new("tabbar"), egui::Sense::click());
+        let over = resp.hover_pos().and_then(|at| hits.iter().rev().find(|h| h.0.contains(at)).map(|h| h.1));
+        if over.is_some() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if resp.clicked() {
+            match over {
+                Some(draw::TabHit::Switch(i)) => self.switch(i),
+                Some(draw::TabHit::Close(i)) => self.close_tab(i),
+                None => {}
+            }
         }
     }
 
@@ -725,7 +879,7 @@ mod tests {
         });
         std::fs::write(&path, state.to_string()).unwrap();
         unsafe { std::env::set_var("ARCH_STATE", &path) };
-        Viewer::new(egui::Context::default())
+        Viewer::new(egui::Context::default(), String::new(), None)
     }
 
     #[test]

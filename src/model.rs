@@ -129,6 +129,8 @@ pub struct Arch {
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
     pub changes: Changes,
+    /// プロジェクトごとのリポジトリの場所（開いたときの範囲を、herdr のペインのフォルダから決める）
+    pub repos: HashMap<String, String>,
 }
 
 #[derive(Deserialize, Clone, Default)]
@@ -193,17 +195,107 @@ pub struct View {
     pub owners: Vec<String>,
 }
 
-/// 全体の view。骨格は picked のプロジェクトのもの（無ければ最初のもの）を出す（arch_view.py の rebuild で scope が全体のとき）。
-/// 部品は写しにして、出す骨格の番号だけを step に入れる
+/// 全体の view（--dump-layout と、Python との突き合わせで使う）
 pub fn view_all(a: &Arch, picked: Option<&str>) -> View {
-    let owners: Vec<String> = a.nodes.iter().flat_map(|n| n.steps.keys()).cloned().collect::<std::collections::BTreeSet<_>>().into_iter().collect();
-    let owner = picked.filter(|p| owners.iter().any(|o| o == p)).map(str::to_string).or_else(|| owners.first().cloned());
+    view_for(a, "", picked)
+}
+
+/// 表示する部品の id（arch.py の scope の写し）。scope が空なら全部。あれば、そのプロジェクトの部品と、線 1 本でつながる部品
+pub fn scope_ids(a: &Arch, scope: &str) -> std::collections::HashSet<String> {
+    let ids: std::collections::HashSet<String> = a.nodes.iter().map(|n| n.id.clone()).collect();
+    if scope.is_empty() {
+        return ids;
+    }
+    let own: std::collections::HashSet<String> = a.nodes.iter().filter(|n| n.project == scope).map(|n| n.id.clone()).collect();
+    let mut out = own.clone();
+    for e in &a.edges {
+        if own.contains(&e.from) && ids.contains(&e.to) {
+            out.insert(e.to.clone());
+        }
+        if own.contains(&e.to) && ids.contains(&e.from) {
+            out.insert(e.from.clone());
+        }
+    }
+    out
+}
+
+/// タブの範囲（scope: プロジェクト名、空なら全体）の view（arch_view.py の rebuild の写し）。
+/// どのプロジェクトの骨格を出すか: プロジェクトの範囲ではそのプロジェクトの骨格だけ（無ければ出さない）。
+/// 全体では picked（帯の名前を押して選んだもの）、無ければ最初のもの。
+/// 部品は写しにして、出す骨格の番号だけを step に入れる（タブごとに出す骨格が違っても混ざらない）
+pub fn view_for(a: &Arch, scope: &str, picked: Option<&str>) -> View {
+    let keep = scope_ids(a, scope);
+    let all: Vec<String> = a
+        .nodes
+        .iter()
+        .filter(|n| keep.contains(&n.id))
+        .flat_map(|n| n.steps.keys())
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let (owner, owners) = if scope.is_empty() {
+        let owner = picked.filter(|p| all.iter().any(|o| o == p)).map(str::to_string).or_else(|| all.first().cloned());
+        (owner, all)
+    } else {
+        let owner = all.iter().find(|o| *o == scope).cloned();
+        let owners = owner.iter().cloned().collect();
+        (owner, owners)
+    };
     let nodes = a
         .nodes
         .iter()
+        .filter(|n| keep.contains(&n.id))
         .map(|n| Node { step: owner.as_ref().and_then(|o| n.steps.get(o).copied()), ..n.clone() })
         .collect();
-    View { zones: a.zones.clone(), nodes, edges: a.edges.clone(), owner, owners }
+    let edges = a.edges.iter().filter(|e| keep.contains(&e.from) && keep.contains(&e.to)).cloned().collect();
+    View { zones: a.zones.clone(), nodes, edges, owner, owners }
+}
+
+/// フォルダの形をそろえる（Windows は大文字小文字・区切りの向きを区別しない）
+fn norm_path(p: &str) -> String {
+    p.replace('\\', "/").trim_end_matches('/').to_lowercase()
+}
+
+/// フォルダから、どのプロジェクトの範囲を見せるか（arch.py の project_of の写し）。
+/// リポジトリ（と横の <repo>-wt-*）ならそのプロジェクト、リポジトリを並べたフォルダ（develop など）なら全部（""）、
+/// 関係ないフォルダなら None（今の範囲のまま）
+pub fn project_of(cwd: &str, repos: &HashMap<String, String>) -> Option<String> {
+    if cwd.is_empty() {
+        return None;
+    }
+    let here = norm_path(cwd);
+    let mut chain = vec![here.clone()];
+    let mut cur = here.as_str();
+    while let Some(i) = cur.rfind('/') {
+        cur = &cur[..i];
+        if cur.is_empty() {
+            break;
+        }
+        chain.push(cur.to_string());
+    }
+    let split = |p: &str| -> (String, String) {
+        match p.rfind('/') {
+            Some(i) => (p[..i].to_string(), p[i + 1..].to_string()),
+            None => (String::new(), p.to_string()),
+        }
+    };
+    let mut parents = vec![];
+    let mut projects: Vec<(&String, &String)> = repos.iter().filter(|(_, r)| !r.is_empty()).collect();
+    projects.sort(); // 決まった順に調べる
+    for (project, repo) in projects {
+        let root = norm_path(repo);
+        let (root_parent, root_name) = split(&root);
+        parents.push(root_parent.clone());
+        let wt = format!("{root_name}-wt-");
+        if chain.iter().any(|p| *p == root || {
+            let (pp, name) = split(p);
+            pp == root_parent && name.starts_with(&wt)
+        }) {
+            return Some(project.clone());
+        }
+    }
+    parents.contains(&here).then(String::new)
 }
 
 pub struct Through {
@@ -230,4 +322,40 @@ pub fn through(nodes: &[Node]) -> Through {
     }
     let next = bones.iter().find(|n| n.step.unwrap() > k).map(|n| n.id.clone());
     Through { through: k, next }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn repos() -> HashMap<String, String> {
+        [("shop", "C:/dev/shop"), ("api", "C:/dev/api"), ("none", "")].iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn フォルダからプロジェクト() {
+        assert_eq!(project_of("C:/dev/shop", &repos()).as_deref(), Some("shop"));
+        assert_eq!(project_of("C:/dev/shop/src/x", &repos()).as_deref(), Some("shop"));
+        assert_eq!(project_of(r"C:\Dev\Shop\src", &repos()).as_deref(), Some("shop")); // 区切りと大文字小文字は問わない
+        assert_eq!(project_of("C:/dev/api-wt-fix", &repos()).as_deref(), Some("api")); // 横の worktree
+        assert_eq!(project_of("C:/dev/api-wt-fix/src", &repos()).as_deref(), Some("api"));
+        assert_eq!(project_of("C:/dev", &repos()).as_deref(), Some("")); // リポジトリを並べたフォルダ: 全体
+        assert_eq!(project_of("C:/elsewhere", &repos()), None); // 関係ないフォルダ
+        assert_eq!(project_of("", &repos()), None);
+    }
+
+    #[test]
+    fn 範囲はそのプロジェクトと線1本でつながる部品() {
+        let node = |id: &str, project: &str| Node { id: id.into(), project: project.into(), ..Default::default() };
+        let edge = |a: &str, b: &str| Edge { from: a.into(), to: b.into(), ..Default::default() };
+        let a = Arch {
+            nodes: vec![node("shop:cart", "shop"), node("shop:mail", "shop"), node("api:stock", "api"), node("api:admin", "api"), node("x:far", "x"), node("x:far2", "x")],
+            edges: vec![edge("shop:cart", "api:stock"), edge("api:admin", "shop:mail"), edge("x:far", "x:far2"), edge("api:stock", "api:admin")],
+            ..Default::default()
+        };
+        let mut got: Vec<String> = scope_ids(&a, "api").into_iter().collect();
+        got.sort();
+        assert_eq!(got, ["api:admin", "api:stock", "shop:cart", "shop:mail"]);
+        assert_eq!(scope_ids(&a, "").len(), 6);
+    }
 }
