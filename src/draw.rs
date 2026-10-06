@@ -526,14 +526,41 @@ pub fn diagram(p: &Painter, view: &View, lay: &Layout, changes: &Changes, cam: &
     }
 }
 
-/// 上の帯（題・操作の案内・何時の state か）
-pub fn header(p: &Painter, area: Rect, title: &str, hint: &str, meta: &str) {
+/// 上の帯で押せるもの
+#[derive(Clone, Copy)]
+pub enum HeadHit {
+    Drift,
+    Changes,
+}
+
+/// 上の帯（題・凡例・ずれと変化の数・操作の案内・何時の state か）。返すのは押せる所
+pub fn header(p: &Painter, area: Rect, title: &str, hint: &str, meta: &str, drift: usize, changes: usize) -> Vec<(Rect, HeadHit)> {
     let r = Rect::from_min_size(area.min, vec2(area.width(), HEAD_H));
     p.rect_filled(r, 0.0, PANEL);
     p.line_segment([pos2(r.min.x, r.max.y), pos2(r.max.x, r.max.y)], Stroke::new(1.0_f32, LINE));
-    p.text(pos2(r.min.x + 14.0, r.center().y), Align2::LEFT_CENTER, title, font(12.0, true), TEXT);
-    let m = p.text(pos2(r.max.x - 14.0, r.center().y), Align2::RIGHT_CENTER, meta, font(9.0, false), DIM);
-    p.text(pos2(m.min.x - 24.0, r.center().y), Align2::RIGHT_CENTER, hint, font(9.0, false), FAINT);
+    let t = p.text(pos2(r.min.x + 14.0, r.center().y), Align2::LEFT_CENTER, title, font(12.0, true), TEXT);
+    // 凡例: 線の種類 4 つ（形で分ける）と、状態の丸 4 つを 1 行で
+    let (f, y) = (font(9.0, false), r.center().y);
+    let mut x = t.max.x + 28.0;
+    for k in ["live", "wip", "none", "stop"] {
+        polyline(p, vec![pos2(x, y), pos2(x + 24.0, y)], 1.0, EDGE, dash(k), "", (0.0, 0.0, 0.0));
+        x += 30.0;
+        p.circle_filled(pos2(x, y), 3.5, status_color(k));
+        x = p.text(pos2(x + 8.0, y), Align2::LEFT_CENTER, status_short(k), f.clone(), DIM).max.x + 18.0;
+    }
+    let m = p.text(pos2(r.max.x - 14.0, y), Align2::RIGHT_CENTER, meta, f.clone(), DIM);
+    let h = p.text(pos2(m.min.x - 24.0, y), Align2::RIGHT_CENTER, hint, f, FAINT);
+    // 図と現物のずれ・前回からの変化。あるときだけ紺の文字で出し、押すと右に一覧
+    let mut hits = vec![];
+    let mut right = h.min.x - 24.0;
+    for (n, text, hit) in [(drift, format!("図と現物のずれ {drift}"), HeadHit::Drift), (changes, format!("前回から {changes} 件"), HeadHit::Changes)] {
+        if n > 0 {
+            let b = p.text(pos2(right, y), Align2::RIGHT_CENTER, text, font(9.0, true), BONE);
+            hits.push((b.expand(4.0), hit));
+            right = b.min.x - 16.0;
+        }
+    }
+    hits
 }
 
 /// 下の帯で押せるもの

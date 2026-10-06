@@ -118,11 +118,37 @@ pub struct Change {
     pub to: Was,
 }
 
+/// 骨格の、端から切れ目なく本番の所の変化
+#[derive(Deserialize, Clone, Default)]
+#[serde(default)]
+pub struct SkeletonChange {
+    pub from: Option<u32>,
+    pub to: u32,
+}
+
 #[derive(Deserialize, Clone, Default)]
 #[serde(default)]
 pub struct Changes {
     pub since: String,
     pub nodes: HashMap<String, Change>,
+    pub skeletons: BTreeMap<String, SkeletonChange>,
+}
+
+/// paths に書いたのに origin/main に無いもの
+#[derive(Deserialize, Clone, Default)]
+#[serde(default)]
+pub struct Missing {
+    pub path: String,
+    pub node: String,
+}
+
+/// 図と現物のずれ（プロジェクトごと）
+#[derive(Deserialize, Clone, Default)]
+#[serde(default)]
+pub struct Drift {
+    /// 見張っている場所にあるのに、どの部品の paths にも無いもの（宣言漏れ）
+    pub unclaimed: Vec<String>,
+    pub missing: Vec<Missing>,
 }
 
 #[derive(Deserialize, Clone, Default)]
@@ -132,6 +158,7 @@ pub struct Arch {
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
     pub changes: Changes,
+    pub drift: HashMap<String, Drift>,
     /// プロジェクトごとのリポジトリの場所（開いたときの範囲を、herdr のペインのフォルダから決める）
     pub repos: HashMap<String, String>,
 }

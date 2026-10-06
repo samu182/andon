@@ -26,7 +26,7 @@ pub struct Side {
     opened: HashMap<(String, String), bool>,
 }
 
-fn status_text(kind: &str) -> &'static str {
+pub fn status_text(kind: &str) -> &'static str {
     match kind {
         "live" => "本番で動いている",
         "wip" => "作りかけ",
@@ -325,4 +325,90 @@ impl Side {
         }
         out
     }
+}
+
+/// 右の欄の一覧の 1 行
+pub enum Line {
+    /// 文字（大きさ・色）
+    Text(String, f32, Color32),
+    /// 小見出し
+    Label(String),
+    /// 押すと既定のブラウザで開く
+    Link(String, Option<String>),
+    Gap,
+}
+
+/// 右の欄に一覧を出す（図と現物のずれ・前回からの変化）
+pub fn list(ui: &mut Ui, title: &str, lines: &[Line]) -> Option<Action> {
+    let mut out = None;
+    ui.label(RichText::new(title).font(bold(12.0)).color(TEXT));
+    ui.add_space(6.0);
+    for l in lines {
+        match l {
+            Line::Text(s, size, color) => text(ui, s, *size, *color),
+            Line::Label(s) => label(ui, s),
+            Line::Link(s, url) => link_or_text(ui, s, url.clone(), &mut out),
+            Line::Gap => ui.add_space(6.0),
+        }
+    }
+    out
+}
+
+/// 図と現物のずれ（宣言漏れ・消えたファイル）。今のタブに出ているプロジェクトだけ
+pub fn drift_lines(st: &State, view: &View) -> Vec<Line> {
+    let mut lines = vec![Line::Text(
+        "見張っている場所にあるのに、どの部品の paths にも無いもの（宣言漏れ）と、paths に書いたのに origin/main に無いもの。\
+         部品の paths に足すか、宣言の ignore に足すと消える。"
+            .into(),
+        9.0,
+        FAINT,
+    )];
+    let Some(a) = &st.arch else { return lines };
+    let projects: std::collections::BTreeSet<&str> = view.nodes.iter().map(|n| n.project.as_str()).collect();
+    for p in projects {
+        let Some(d) = a.drift.get(p) else { continue };
+        if d.unclaimed.is_empty() && d.missing.is_empty() {
+            continue;
+        }
+        let gh = st.projects.get(p).map(|x| x.github.clone()).unwrap_or_default();
+        lines.push(Line::Gap);
+        lines.push(Line::Label(p.to_string()));
+        for f in &d.unclaimed {
+            lines.push(Line::Link(format!("宣言に無い: {f}"), gh_url(&gh, &format!("tree/main/{f}"))));
+        }
+        for m in &d.missing {
+            let node = m.node.split_once(':').map_or(m.node.as_str(), |x| x.1);
+            lines.push(Line::Text(format!("無くなった: {}（{node}）", m.path), 10.0, crate::draw::ERROR));
+        }
+    }
+    lines
+}
+
+/// 図と現物のずれの数（今のタブに出ているプロジェクトだけ）
+pub fn drift_count(st: &State, view: &View) -> usize {
+    let Some(a) = &st.arch else { return 0 };
+    let projects: std::collections::BTreeSet<&str> = view.nodes.iter().map(|n| n.project.as_str()).collect();
+    projects.iter().filter_map(|p| a.drift.get(*p)).map(|d| d.unclaimed.len() + d.missing.len()).sum()
+}
+
+/// 前回（その日の最初の写し）からの変化
+pub fn change_lines(st: &State) -> Vec<Line> {
+    let Some(a) = &st.arch else { return vec![] };
+    let ch = &a.changes;
+    let since = if ch.since.is_empty() { "—" } else { ch.since.as_str() };
+    let mut lines = vec![Line::Text(format!("{since} の初めから、状態か待ちが変わった部品。"), 9.0, FAINT)];
+    for (o, k) in &ch.skeletons {
+        lines.push(Line::Text(format!("{o} の骨格: {} 番まで → {} 番まで本番", k.from.unwrap_or(0), k.to), 10.0, TEXT));
+    }
+    let names: HashMap<&str, &str> = a.nodes.iter().map(|n| (n.id.as_str(), n.title.as_str())).collect();
+    let mut ids: Vec<&String> = ch.nodes.keys().collect();
+    ids.sort();
+    for id in ids {
+        let c = &ch.nodes[id];
+        let old = c.from.as_ref().map_or("新しく宣言", |w| status_text(&w.status));
+        let why = if c.to.blocked.is_empty() { String::new() } else { format!("（{}）", c.to.blocked) };
+        let name = names.get(id.as_str()).copied().unwrap_or(id);
+        lines.push(Line::Text(format!("{name}: {old} → {}{why}", status_text(&c.to.status)), 10.0, TEXT));
+    }
+    lines
 }

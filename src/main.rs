@@ -9,6 +9,7 @@
 //! 環境変数 ARCH_BENCH=<書き出す先> を付けると、図を 1 画素ずつ動かしながら 180 回描き直し、
 //! 1 回あたりの時間を書き出して閉じる（CPU で描く版と GPU で描く版を比べるため）。
 //! 環境変数 ARCH_SELECT=<部品の id> を付けると、その部品を選んだ状態で開く（右の欄を撮って確かめるため）。
+//! ARCH_SELECT=list:drift / list:changes なら、図と現物のずれ・前回からの変化の一覧を出して開く。
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -194,6 +195,10 @@ struct Viewer {
     selected: Option<String>,
     /// 中身を右に出しているまとめた線
     bundle: Option<usize>,
+    /// 右の欄に出している一覧（図と現物のずれ・前回からの変化）
+    list: Option<draw::HeadHit>,
+    /// 右の欄に前回出していたもの（替わったら、欄をいちばん上から見せる）
+    side_shown: String,
     hover_node: Option<String>,
     hover_edge: Option<usize>,
     side: side::Side,
@@ -252,10 +257,16 @@ impl Viewer {
             bench,
             cam: None,
             moved: false,
-            selected: std::env::var("ARCH_SELECT").ok(),
+            selected: std::env::var("ARCH_SELECT").ok().filter(|s| !s.starts_with("list:")),
             bundle: None,
+            list: match std::env::var("ARCH_SELECT").as_deref() {
+                Ok("list:drift") => Some(draw::HeadHit::Drift),
+                Ok("list:changes") => Some(draw::HeadHit::Changes),
+                _ => None,
+            },
             hover_node: None,
             hover_edge: None,
+            side_shown: String::new(),
             side: side::Side::default(),
             flash: None,
             bones_only: false,
@@ -389,9 +400,12 @@ impl Viewer {
             self.moved = false; // f: 全体を収め直す
         }
         if esc {
-            (self.selected, self.bundle, self.flow, self.playing) = (None, None, None, None); // 骨格をたどるのも終わる
+            (self.selected, self.bundle, self.flow, self.playing, self.list) = (None, None, None, None, None); // 骨格をたどるのも終わる
         }
-        let side_open = self.selected.is_some() || self.bundle.is_some();
+        if self.selected.is_some() || self.bundle.is_some() {
+            self.list = None; // 部品やまとめた線を選んだら、一覧はたたむ
+        }
+        let side_open = self.selected.is_some() || self.bundle.is_some() || self.list.is_some();
         // 右の欄は図の上に重ねる（出し入れで図の倍率を変えない。選ぶたびに図が縮むと見失う）
         let canvas = if side_open { egui::Rect::from_min_max(body.min, egui::pos2(body.max.x - side::WIDTH, body.max.y)) } else { body };
         self.canvas = canvas;
@@ -475,7 +489,23 @@ impl Viewer {
             _ => self.msg.clone(),
         };
         let title = if self.scope.is_empty() { "構成図 — 全体".to_string() } else { format!("構成図 — {} とつながる部品", self.scope) };
-        draw::header(&p, area, &title, "押すと詳しく　f 全体　s 骨格だけ　← → 骨格をたどる　r 更新", &meta);
+        let (n_drift, n_change) = match (&self.state, &self.view) {
+            (Some(st), Some(v)) => {
+                let ids: std::collections::HashSet<&str> = v.nodes.iter().map(|n| n.id.as_str()).collect();
+                let changed = st.arch.as_ref().map_or(0, |a| a.changes.nodes.keys().filter(|k| ids.contains(k.as_str())).count());
+                (side::drift_count(st, v), changed)
+            }
+            _ => (0, 0),
+        };
+        let head = draw::header(&p, area, &title, "押すと詳しく　f 全体　s 骨格だけ　← → 骨格をたどる　r 更新", &meta, n_drift, n_change);
+        let head_resp = ui.interact(egui::Rect::from_min_size(area.min, egui::vec2(area.width(), draw::HEAD_H)), egui::Id::new("header"), egui::Sense::click());
+        let over = head_resp.hover_pos().and_then(|at| head.iter().find(|h| h.0.contains(at)).map(|h| h.1));
+        if over.is_some() {
+            ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if let (true, Some(hit)) = (head_resp.clicked(), over) {
+            (self.list, self.selected, self.bundle) = (Some(hit), None, None);
+        }
         self.bench_tick(&ctx, body);
     }
 
@@ -579,16 +609,24 @@ impl Viewer {
         p.line_segment([rect.left_top(), rect.left_bottom()], egui::Stroke::new(1.0_f32, draw::LINE));
         let (Some(view), Some(lay), Some(st)) = (&self.view, &self.lay, &self.state) else { return };
         let inner = rect.shrink(16.0);
-        let salt = format!("{:?}{:?}", self.selected, self.bundle); // 選び直したら、欄を上から
+        let salt = format!("{:?}{:?}{}", self.selected, self.bundle, self.list.map_or(0, |l| l as u8 + 1)); // 選び直したら、欄を上から
+        let fresh = salt != self.side_shown;
+        self.side_shown = salt.clone();
         let mut act = None;
-        let (selected, bundle, side, working) = (&self.selected, self.bundle, &mut self.side, &self.working);
+        let (selected, bundle, side, working, list) = (&self.selected, self.bundle, &mut self.side, &self.working, self.list);
         ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
-            egui::ScrollArea::vertical().id_salt(salt).auto_shrink([false, false]).show(ui, |ui| {
+            let mut area = egui::ScrollArea::vertical().id_salt(&salt).auto_shrink([false, false]);
+            if fresh {
+                area = area.vertical_scroll_offset(0.0); // 長い一覧が、開いた時点で少し下までずれていた（題が隠れた）
+            }
+            area.show(ui, |ui| {
                 ui.set_width(inner.width() - 12.0);
-                act = match (selected, bundle) {
-                    (Some(id), _) => view.nodes.iter().find(|n| &n.id == id).and_then(|n| side.node(ui, st, view, n, working.get(&n.id))),
-                    (None, Some(b)) if b < lay.bundles.len() => side.bundle(ui, view, lay, b),
+                act = match (selected, bundle, list) {
+                    (Some(id), _, _) => view.nodes.iter().find(|n| &n.id == id).and_then(|n| side.node(ui, st, view, n, working.get(&n.id))),
+                    (None, Some(b), _) if b < lay.bundles.len() => side.bundle(ui, view, lay, b),
+                    (None, None, Some(draw::HeadHit::Drift)) => side::list(ui, "図と現物のずれ", &side::drift_lines(st, view)),
+                    (None, None, Some(draw::HeadHit::Changes)) => side::list(ui, "前回からの変化", &side::change_lines(st)),
                     _ => None,
                 };
             });
