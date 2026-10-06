@@ -2,7 +2,8 @@
 //!
 //!   arch-view                         窓を開く（範囲は herdr で今選んでいるペインのプロジェクト。リポジトリでなければ全体）
 //!   arch-view <project>|all           その範囲のタブで開く
-//! すでに開いていれば、開いている窓に「そのプロジェクトのタブを足して前に出て」と知らせて終わる（窓は増やさない）。
+//! すでに開いていれば、開いている窓に「その範囲（渡された範囲か、今選んでいるペインのプロジェクト）のタブを足して前に出て」と
+//! 知らせて終わる（窓は増やさない）。
 //!   arch-view --dump-layout <out> [aspect] [段の上限]   並べた結果を JSON で書く（段の上限 1 なら Python の layout と同じ答え）
 //!
 //! 環境変数 ARCH_BENCH=<書き出す先> を付けると、図を 1 画素ずつ動かしながら 180 回描き直し、
@@ -57,14 +58,16 @@ fn main() {
     let repos = || model::load_state().ok().and_then(|s| s.arch).map(|a| a.repos).unwrap_or_default();
     // 今選んでいるペインの範囲（リポジトリならそのプロジェクト・並べたフォルダなら全体・関係ないフォルダなら無し）
     let focused = || win::focused_cwd().and_then(|c| model::project_of(&c, &repos()));
-    let Some(listener) = win::claim(|| focused().map_or("show".to_string(), |s| format!("open:{s}"))) else {
+    // 範囲を渡されていればそれを、無ければ今選んでいるペインの範囲を知らせる
+    let wanted = || match fixed.as_deref() {
+        Some("all") => Some(String::new()),
+        Some(p) => Some(p.to_string()),
+        None => focused(),
+    };
+    let Some(listener) = win::claim(|| wanted().map_or("show".to_string(), |s| format!("open:{s}"))) else {
         return; // もう開いている（知らせは送った）
     };
-    let scope = match fixed.as_deref() {
-        Some("all") => String::new(),
-        Some(p) => p.to_string(),
-        None => focused().unwrap_or_default(),
-    };
+    let scope = wanted().unwrap_or_default();
     run(scope, listener);
 }
 
