@@ -1,6 +1,6 @@
 //! 描く。arch_view.py の redraw の写し（見た目の決まりは向こうのコメントが正本）。
 
-use crate::layout::{Layout, NODE_H, NODE_W, Pt};
+use crate::layout::{Layout, NODE_H, NODE_W, Pt, ZONE_HEAD};
 use crate::model::{Changes, View, through};
 use egui::{
     Align2, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Painter, Pos2, Rect, Shape, Stroke, StrokeKind, pos2, vec2,
@@ -99,14 +99,18 @@ pub fn setup_fonts(ctx: &egui::Context) {
     ctx.set_fonts(defs);
 }
 
-/// 大きさは arch_view.py の font と同じ（px * 1.33 を整数に丸め、8 より小さくしない）
+/// 文字の下限（画素）。8 だと拡大率 150% の画面で潰れて読めなかった（2026-10-06）。
+/// 図を縮めても文字はこれより小さくせず、入りきらない分は「…」で切る
+pub const MIN_FONT: f32 = 11.0;
+
+/// 大きさは arch_view.py の font と同じ（px * 1.33 を整数に丸める）。下限だけ MIN_FONT に上げた
 pub fn font(px: f32, bold: bool) -> FontId {
-    let size = (px * 1.33).round().max(8.0);
+    let size = (px * 1.33).round().max(MIN_FONT);
     FontId::new(size, if bold { FontFamily::Name("bold".into()) } else { FontFamily::Proportional })
 }
 
 fn num_font(px: f32) -> FontId {
-    FontId::new((px * 1.33).round().max(8.0), FontFamily::Name("num".into()))
+    FontId::new((px * 1.33).round().max(MIN_FONT), FontFamily::Name("num".into()))
 }
 
 pub fn measure(p: &Painter, text: &str, f: &FontId) -> f32 {
@@ -389,9 +393,15 @@ pub fn diagram(p: &Painter, view: &View, lay: &Layout, changes: &Changes, cam: &
         }
         let Some(z) = f.key[1..].parse::<usize>().ok().and_then(|i| view.zones.get(i)) else { continue };
         rounded(p, r, R_ZONE * s, Some(zone_mark[z.id.as_str()]), Some((1.0, CARD_LINE)), &[]);
-        p.text(r.min + vec2(16.0 * s, 10.0 * s), Align2::LEFT_TOP, &z.title, font(14.0 * s, true), TEXT);
-        if !z.sub.is_empty() {
-            p.text(r.min + vec2(16.0 * s, 33.0 * s), Align2::LEFT_TOP, &z.sub, font(9.0 * s, false), DIM);
+        // 名前と説明は、枠の上の空き（ZONE_HEAD）に収める。文字の下限で大きくなった分は詰め、入らなければ説明を出さない
+        let (tf, sf) = (font(14.0 * s, true), font(9.0 * s, false));
+        let head = ZONE_HEAD as f32 * s;
+        let top = (10.0 * s).min((head - tf.size - sf.size - 4.0) / 2.0).max(3.0);
+        let room = r.width() - 32.0 * s;
+        let t = p.text(r.min + vec2(16.0 * s, top), Align2::LEFT_TOP, clip(p, &z.title, &tf, room), tf, TEXT);
+        if !z.sub.is_empty() && t.max.y + 2.0 + sf.size <= r.min.y + head - 2.0 {
+            let y = (r.min.y + 33.0 * s).min(t.max.y + 2.0);
+            p.text(pos2(r.min.x + 16.0 * s, y), Align2::LEFT_TOP, clip(p, &z.sub, &sf, room), sf, DIM);
         }
     }
     // 線。普段は枠の中の線と、枠どうしをまとめた線だけ。部品を押す・乗せると、その部品の線を行き先まで出す
@@ -437,11 +447,17 @@ pub fn diagram(p: &Painter, view: &View, lay: &Layout, changes: &Changes, cam: &
         let sel = focus.selected == Some(n.id.as_str());
         // 部品を選んでいるときは、つながっていない部品も薄くする（Ilograph の「関係ないものを隠す」に倣う）
         let faded = (focus.bones_only && !n.skeleton) || (fnode.is_some() && !near.contains(&n.id.as_str()));
-        let (pad, sf, tf) = (12.0 * s, font(9.0 * s, false), font(10.0 * s, true));
+        let (pad, sf, tf) = ((12.0 * s).max(6.0), font(9.0 * s, false), font(10.0 * s, true));
+        // 四角が低くて 2 行（名前と説明）が入らないときは、名前だけを真ん中に出す（説明と状態の文字は右の欄で読む）
+        let two = r.height() >= (tf.size + sf.size) * 1.3 + 4.0;
+        let title_y = if two { r.min.y + (15.0 * s).max(tf.size * 0.5 + 3.0) } else { r.center().y };
+        let sub_y = r.max.y - (14.0 * s).max(sf.size * 0.5 + 3.0);
         if faded {
             rounded(p, r, R_NODE * s, Some(BG), Some((1.0, EDGE_QUIET)), &[]);
-            p.text(pos2(r.min.x + pad, r.min.y + 15.0 * s), Align2::LEFT_CENTER, clip(p, &n.title, &tf, w - pad * 2.0 - 16.0 * s), tf, FAINT);
-            p.text(pos2(r.min.x + pad, r.max.y - 14.0 * s), Align2::LEFT_CENTER, clip(p, &n.sub, &sf, w - pad * 2.0 - 30.0 * s), sf, FAINT);
+            p.text(pos2(r.min.x + pad, title_y), Align2::LEFT_CENTER, clip(p, &n.title, &tf, w - pad * 2.0 - 16.0 * s), tf, FAINT);
+            if two {
+                p.text(pos2(r.min.x + pad, sub_y), Align2::LEFT_CENTER, clip(p, &n.sub, &sf, w - pad * 2.0 - 30.0 * s), sf, FAINT);
+            }
             continue;
         }
         if sk.next.as_deref() == Some(n.id.as_str()) {
@@ -459,26 +475,30 @@ pub fn diagram(p: &Painter, view: &View, lay: &Layout, changes: &Changes, cam: &
         };
         let outline = if sel { (2.0, BONE) } else { (1.0, CARD_LINE) };
         rounded(p, r, R_NODE * s, Some(fill), Some(outline), if kind == "none" && !sel { &[4.0, 3.0] } else { &[] });
-        let word = if kind == "live" { "" } else { status_short(kind) }; // 本番は丸だけ（多数派なので文字を出すと題を削る）
-        let ww = if word.is_empty() { 10.0 * s } else { measure(p, word, &sf) + 12.0 * s };
-        let rad = 3.5 * s;
-        let dy = r.min.y + 15.0 * s;
+        // 本番は丸だけ（多数派なので文字を出すと題を削る）。1 行しか入らないときも丸だけ（色の地と丸で分かる）
+        let word = if kind == "live" || !two { "" } else { status_short(kind) };
+        let ww = if word.is_empty() { (10.0 * s).max(8.0) } else { measure(p, word, &sf) + 12.0 * s };
+        let rad = (3.5 * s).max(2.5);
+        let dy = title_y;
         p.circle_filled(pos2(r.max.x - pad - ww + rad, dy), rad, status_color(kind));
         p.text(pos2(r.max.x - pad, dy), Align2::RIGHT_CENTER, word, sf.clone(), DIM);
         let title = clip(p, &n.title, &tf, w - pad * 2.0 - ww - 6.0 * s);
         p.text(pos2(r.min.x + pad, dy), Align2::LEFT_CENTER, title, tf, TEXT);
-        let sub = clip(p, &n.sub, &sf, w - pad * 2.0 - 30.0 * s);
-        p.text(pos2(r.min.x + pad, r.max.y - 14.0 * s), Align2::LEFT_CENTER, sub, sf, FAINT);
-        if changes.nodes.contains_key(&n.id) {
-            // 前回から状態か待ちが変わった
-            p.text(pos2(r.max.x - pad, r.max.y - 14.0 * s), Align2::RIGHT_CENTER, "変化", font(8.5 * s, true), BONE);
+        if two {
+            let sub = clip(p, &n.sub, &sf, w - pad * 2.0 - 30.0 * s);
+            p.text(pos2(r.min.x + pad, sub_y), Align2::LEFT_CENTER, sub, sf, FAINT);
+            if changes.nodes.contains_key(&n.id) {
+                // 前回から状態か待ちが変わった
+                p.text(pos2(r.max.x - pad, sub_y), Align2::RIGHT_CENTER, "変化", font(8.5 * s, true), BONE);
+            }
         }
         if let Some(step) = n.step {
             // 骨格の番号。切れ目なく本番の所までは塗り、その先は輪だけ
             let done = step <= sk.through;
-            let rad = 9.0 * s;
+            let nf = num_font(8.5 * s);
+            let rad = (9.0 * s).max(nf.size * 0.7);
             p.circle(r.min, rad, if done { BONE } else { CARD }, Stroke::new(1.0_f32, BONE));
-            p.text(r.min, Align2::CENTER_CENTER, step.to_string(), num_font(8.5 * s), if done { WHITE } else { BONE });
+            p.text(r.min, Align2::CENTER_CENTER, step.to_string(), nf, if done { WHITE } else { BONE });
         }
     }
     // 止まっている所の札（黄色の丸 = 待ち。文字は理由だけ、枠の幅に収める）
