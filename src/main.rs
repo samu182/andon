@@ -88,6 +88,7 @@ fn run(scope: String, listener: std::net::TcpListener) {
     let settings = SoftwareBackendAppConfiguration::new()
         .inner_size(Some(egui::vec2(960.0, 600.0)))
         .title(Some("構成図".into()))
+        .icon(Some(std::sync::Arc::new(icon())))
         .caching(false);
     egui_software_backend::run_app_with_software_backend(settings, |ctx: egui::Context| {
         draw::setup_fonts(&ctx);
@@ -106,7 +107,7 @@ fn run(scope: String, listener: std::net::TcpListener) {
         }
     }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([960.0, 600.0]).with_title("構成図"),
+        viewport: egui::ViewportBuilder::default().with_inner_size([960.0, 600.0]).with_title("構成図").with_icon(icon()),
         ..Default::default()
     };
     eframe::run_native(
@@ -118,6 +119,11 @@ fn run(scope: String, listener: std::net::TcpListener) {
         }),
     )
     .expect("窓を作れない");
+}
+
+/// 窓の題の帯とタスクバーのアイコン（四角 3 つを線でつなぐ。assets/make_icon.py が作る 64×64 の RGBA）
+fn icon() -> egui::IconData {
+    egui::IconData { rgba: include_bytes!("../assets/icon-64.rgba").to_vec(), width: 64, height: 64 }
 }
 
 /// 画面の作業領域（タスクバーを除いた所・実際の画素）
