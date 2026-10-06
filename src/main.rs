@@ -5,12 +5,14 @@
 //!
 //! 環境変数 ARCH_BENCH=<書き出す先> を付けると、図を 1 画素ずつ動かしながら 180 回描き直し、
 //! 1 回あたりの時間を書き出して閉じる（CPU で描く版と GPU で描く版を比べるため）。
+//! 環境変数 ARCH_SELECT=<部品の id> を付けると、その部品を選んだ状態で開く（右の欄を撮って確かめるため）。
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod draw;
 mod layout;
 mod model;
+mod side;
 
 use layout::Layout;
 use model::{State, View};
@@ -121,6 +123,13 @@ struct Bench {
     times: Vec<f64>,
 }
 
+/// 図の上の、押した・乗せた所にあるもの
+enum Hit {
+    Node(String),
+    Edge(usize),
+    Bundle(usize),
+}
+
 struct Viewer {
     state: Option<State>,
     view: Option<View>,
@@ -134,13 +143,41 @@ struct Viewer {
     size: egui::Vec2,
     ctx: egui::Context,
     bench: Option<Bench>,
+    cam: Option<draw::Camera>,
+    /// 手で動かした・拡大したら、自動で収め直さない（f で戻す）
+    moved: bool,
+    selected: Option<String>,
+    /// 中身を右に出しているまとめた線
+    bundle: Option<usize>,
+    hover_node: Option<String>,
+    hover_edge: Option<usize>,
+    side: side::Side,
+    /// 上の帯に少しのあいだ出す知らせ（コピーした、など）
+    flash: Option<(String, Instant)>,
 }
 
 impl Viewer {
     fn new(ctx: egui::Context) -> Self {
         let bench = std::env::var("ARCH_BENCH").ok().map(|out| Bench { out, last: None, times: vec![] });
-        let size = egui::vec2(WIN_W, WIN_H);
-        let mut v = Viewer { state: None, view: None, lay: None, msg: String::new(), pending: None, zoomed: false, size, ctx, bench };
+        let mut v = Viewer {
+            state: None,
+            view: None,
+            lay: None,
+            msg: String::new(),
+            pending: None,
+            zoomed: false,
+            size: egui::vec2(WIN_W, WIN_H),
+            ctx,
+            bench,
+            cam: None,
+            moved: false,
+            selected: std::env::var("ARCH_SELECT").ok(),
+            bundle: None,
+            hover_node: None,
+            hover_edge: None,
+            side: side::Side::default(),
+            flash: None,
+        };
         match model::load_state() {
             Ok(st) => {
                 match &st.arch {
@@ -160,11 +197,12 @@ impl Viewer {
     fn ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         if !self.zoomed {
-            // 大きさは Python 版と同じく実際の画素で決める（1 点 = 1 画素、窓は 1400×860 画素）。
+            // 大きさは Python 版と同じく実際の画素で決める（1 点 = 1 画素）。
             // Windows の拡大率（この PC は 150%）をかけると、窓が画面より大きくなった（2026-10-06）。
             // 窓の大きさの指示は拡大率をかけた単位で受け取られるので、拡大率で割って渡す
             if let Some(ppp) = ctx.native_pixels_per_point() {
                 ctx.set_zoom_factor(1.0 / ppp);
+                ctx.options_mut(|o| o.zoom_with_keyboard = false); // Ctrl+- などで egui 全体の倍率を変えさせない
                 // CPU で描く部品は画面の大きさを教えてくれないので、Windows に作業領域（タスクバーを除く）を聞く
                 if let Some(wa) = work_area() {
                     self.size = (wa.size() * egui::vec2(SCREEN_W, SCREEN_H)).round();
@@ -184,6 +222,7 @@ impl Viewer {
                     Ok(lay) => {
                         self.lay = Some(lay);
                         self.msg.clear();
+                        self.moved = false;
                     }
                     Err(e) => self.msg = format!("並べられない: {e}"),
                 }
@@ -191,25 +230,129 @@ impl Viewer {
             }
         }
         let area = ui.max_rect();
-        let p = ui.painter();
+        let p = ui.painter().clone();
         let body = egui::Rect::from_min_max(area.min + egui::vec2(0.0, draw::HEAD_H), area.max);
-        draw::paper(p, body);
-        if let (Some(view), Some(lay), Some(st)) = (&self.view, &self.lay, &self.state) {
-            let mut cam = draw::Camera::fit(body, lay);
-            if let Some(b) = &self.bench {
-                cam.origin.x += b.times.len() as f32; // 引きずって動かしているのと同じ描き直し
-            }
-            let changes = st.arch.as_ref().map(|a| &a.changes).unwrap_or(&serde_json::Value::Null);
-            draw::diagram(&p.with_clip_rect(body), view, lay, changes, &cam);
+        draw::paper(&p, body);
+        let (f_key, esc) = ui.input(|i| (i.key_pressed(egui::Key::F), i.key_pressed(egui::Key::Escape)));
+        if f_key {
+            self.moved = false; // f: 全体を収め直す
         }
-        let meta = match (&self.state, &self.view) {
-            (Some(st), Some(v)) if self.msg.is_empty() => {
+        if esc {
+            (self.selected, self.bundle) = (None, None);
+        }
+        let side_open = self.selected.is_some() || self.bundle.is_some();
+        // 右の欄は図の上に重ねる（出し入れで図の倍率を変えない。選ぶたびに図が縮むと見失う）
+        let canvas = if side_open { egui::Rect::from_min_max(body.min, egui::pos2(body.max.x - side::WIDTH, body.max.y)) } else { body };
+        let resp = ui.interact(canvas, egui::Id::new("canvas"), egui::Sense::click_and_drag());
+        if let (Some(view), Some(lay), Some(st)) = (&self.view, &self.lay, &self.state) {
+            if !self.moved || self.cam.is_none() {
+                self.cam = Some(draw::Camera::fit(body, lay));
+            }
+            let cam = self.cam.as_mut().unwrap();
+            if resp.dragged() {
+                cam.origin += resp.drag_delta(); // ドラッグで移動
+                self.moved = true;
+            }
+            if let (true, Some(at)) = (resp.hovered(), resp.hover_pos()) {
+                // ホイールで、指している所を中心に拡大縮小（0.25 倍から 3 倍まで）
+                let notches: f32 = ui.input(|i| {
+                    i.events
+                        .iter()
+                        .filter_map(|e| match e {
+                            egui::Event::MouseWheel { unit, delta, .. } => {
+                                Some(if *unit == egui::MouseWheelUnit::Line { delta.y } else { delta.y / 50.0 })
+                            }
+                            _ => None,
+                        })
+                        .sum()
+                });
+                if notches != 0.0 {
+                    let ns = (cam.scale * (notches * 0.12).exp()).clamp(0.25, 3.0);
+                    cam.origin = at - (at - cam.origin) * (ns / cam.scale);
+                    cam.scale = ns;
+                    self.moved = true;
+                }
+            }
+            let cam = self.cam.as_ref().unwrap();
+            let fnode = self.hover_node.as_deref().or(self.selected.as_deref());
+            let at = if resp.dragged() { None } else { resp.hover_pos() };
+            let hit = at.and_then(|at| hit(view, lay, cam, at, fnode));
+            (self.hover_node, self.hover_edge) = match &hit {
+                Some(Hit::Node(id)) => (Some(id.clone()), None),
+                Some(Hit::Edge(i)) => (None, Some(*i)),
+                _ => (None, None),
+            };
+            if hit.is_some() {
+                ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            if resp.clicked() {
+                (self.selected, self.bundle) = match hit {
+                    Some(Hit::Node(id)) => (Some(id), None),
+                    Some(Hit::Bundle(b)) => (None, Some(b)), // まとめた線: 中身を右に一覧で出す
+                    _ => (None, None),
+                };
+            }
+            let mut shown = draw::Camera { scale: cam.scale, origin: cam.origin };
+            if let Some(b) = &self.bench {
+                shown.origin.x += b.times.len() as f32; // 引きずって動かしているのと同じ描き直し
+            }
+            let focus = draw::Focus {
+                selected: self.selected.as_deref(),
+                hover_node: self.hover_node.as_deref(),
+                hover_edge: self.hover_edge,
+                bones_only: false,
+            };
+            let changes = st.arch.as_ref().map(|a| a.changes.clone()).unwrap_or_default();
+            draw::diagram(&p.with_clip_rect(body), view, lay, &changes, &shown, &focus);
+        }
+        if side_open {
+            self.side_panel(ui, body);
+        }
+        let meta = match (&self.flash, &self.state, &self.view) {
+            (Some((m, at)), _, _) if at.elapsed().as_secs_f32() < 3.0 => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(500));
+                m.clone()
+            }
+            (_, Some(st), Some(v)) if self.msg.is_empty() => {
                 format!("{} 時点・{} 部品", st.generated_at.get(11..16).unwrap_or(""), v.nodes.len())
             }
             _ => self.msg.clone(),
         };
-        draw::header(p, area, "構成図 — 全体", &meta);
+        draw::header(&p, area, "構成図 — 全体", "押すと詳しく　ドラッグで移動　ホイールで拡大　f 全体　Esc 選ぶのをやめる", &meta);
         self.bench_tick(&ctx, body);
+    }
+
+    /// 右の欄（部品か、まとめた線を選んだときだけ）
+    fn side_panel(&mut self, ui: &mut egui::Ui, body: egui::Rect) {
+        let rect = egui::Rect::from_min_max(egui::pos2(body.max.x - side::WIDTH, body.min.y), body.max);
+        let p = ui.painter();
+        p.rect_filled(rect, 0.0, draw::PANEL);
+        p.line_segment([rect.left_top(), rect.left_bottom()], egui::Stroke::new(1.0_f32, draw::LINE));
+        let (Some(view), Some(lay), Some(st)) = (&self.view, &self.lay, &self.state) else { return };
+        let inner = rect.shrink(16.0);
+        let salt = format!("{:?}{:?}", self.selected, self.bundle); // 選び直したら、欄を上から
+        let mut act = None;
+        let (selected, bundle, side) = (&self.selected, self.bundle, &mut self.side);
+        ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+            egui::ScrollArea::vertical().id_salt(salt).auto_shrink([false, false]).show(ui, |ui| {
+                ui.set_width(inner.width() - 12.0);
+                act = match (selected, bundle) {
+                    (Some(id), _) => view.nodes.iter().find(|n| &n.id == id).and_then(|n| side.node(ui, st, view, n)),
+                    (None, Some(b)) if b < lay.bundles.len() => side.bundle(ui, view, lay, b),
+                    _ => None,
+                };
+            });
+        });
+        match act {
+            Some(side::Action::Select(id)) => (self.selected, self.bundle) = (Some(id), None),
+            Some(side::Action::Open(url)) => ui.ctx().open_url(egui::OpenUrl::new_tab(url)),
+            Some(side::Action::Copy(text)) => {
+                ui.ctx().copy_text(text);
+                self.flash = Some(("AI に渡す文をコピーした".into(), Instant::now()));
+            }
+            None => {}
+        }
     }
 
     /// 裏で並べる（Graphviz に数百ミリ秒かかるので、窓の糸では待たない）。窓の形に合わせて段を選ぶ
@@ -248,5 +391,63 @@ impl Viewer {
         let p95 = t[t.len() * 95 / 100];
         let _ = std::fs::write(&b.out, format!("{{\"avg_ms\": {avg:.2}, \"p95_ms\": {p95:.2}, \"frames\": {}}}", t.len()));
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+}
+
+/// その場所のいちばん上にあるもの（部品 → 線 → まとめた線の順）。線は 4 画素まで近ければ当たり
+fn hit(view: &View, lay: &Layout, cam: &draw::Camera, at: egui::Pos2, fnode: Option<&str>) -> Option<Hit> {
+    for n in view.nodes.iter().rev() {
+        if lay.pos.get(&n.id).is_some_and(|&c| draw::node_rect(cam, c).expand(3.0).contains(at)) {
+            return Some(Hit::Node(n.id.clone()));
+        }
+    }
+    let zone_of: std::collections::HashMap<&str, &str> = view.nodes.iter().map(|n| (n.id.as_str(), n.zone.as_str())).collect();
+    let near = |pts: &[layout::Pt]| draw::distance_to(&pts.iter().map(|q| cam.xy(*q)).collect::<Vec<_>>(), at) <= 4.0;
+    for (i, (e, path)) in view.edges.iter().zip(&lay.paths).enumerate() {
+        let shown = zone_of[e.from.as_str()] == zone_of[e.to.as_str()] || fnode.is_some_and(|f| e.from == f || e.to == f);
+        if shown && near(&path.points) {
+            return Some(Hit::Edge(i));
+        }
+    }
+    lay.bundles.iter().position(|b| near(&b.points)).map(Hit::Bundle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use model::{Edge, Node, Zone};
+
+    fn sample() -> (View, Layout) {
+        let node = |id: &str| Node { id: id.into(), zone: "z".into(), status: "live".into(), ..Default::default() };
+        let view = View {
+            zones: vec![Zone { id: "z".into(), ..Default::default() }],
+            nodes: vec![node("a"), node("b")],
+            edges: vec![Edge { from: "a".into(), to: "b".into(), status: "live".into(), ..Default::default() }],
+            owner: None,
+        };
+        let lay = Layout {
+            pos: [("a".to_string(), (100.0, 100.0)), ("b".to_string(), (500.0, 100.0))].into_iter().collect(),
+            frames: vec![],
+            paths: vec![layout::Path { points: vec![(190.0, 100.0), (410.0, 100.0)], label_at: None }],
+            size: (600.0, 200.0),
+            bundles: vec![],
+        };
+        (view, lay)
+    }
+
+    #[test]
+    fn 部品の上を押すとその部品() {
+        let (view, lay) = sample();
+        let cam = draw::Camera { scale: 0.5, origin: egui::pos2(10.0, 20.0) };
+        let at = cam.xy((100.0, 100.0)) + egui::vec2(30.0, 5.0);
+        assert!(matches!(hit(&view, &lay, &cam, at, None), Some(Hit::Node(id)) if id == "a"));
+    }
+
+    #[test]
+    fn 線の近くは線_離れると何も無い() {
+        let (view, lay) = sample();
+        let cam = draw::Camera { scale: 1.0, origin: egui::pos2(0.0, 0.0) };
+        assert!(matches!(hit(&view, &lay, &cam, egui::pos2(300.0, 103.0), None), Some(Hit::Edge(0))));
+        assert!(hit(&view, &lay, &cam, egui::pos2(300.0, 110.0), None).is_none());
     }
 }

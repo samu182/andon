@@ -1,7 +1,7 @@
 //! 描く。arch_view.py の redraw の写し（見た目の決まりは向こうのコメントが正本）。
 
 use crate::layout::{Layout, NODE_H, NODE_W, Pt};
-use crate::model::{View, through};
+use crate::model::{Changes, View, through};
 use egui::{
     Align2, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Painter, Pos2, Rect, Shape, Stroke, StrokeKind, pos2, vec2,
 };
@@ -26,6 +26,7 @@ const TINT_STOP: Color32 = hex(0xfbf1d6);
 const TINT_NONE: Color32 = hex(0xeef0f2);
 pub const BONE: Color32 = hex(0x1e3a8a); // アクセントは紺 1 色だけ（選んだもの・リンク・骨格の番号）
 const WHITE: Color32 = hex(0xffffff);
+pub const ERROR: Color32 = hex(0xcf222e); // 赤はエラーだけ（待ちはエラーではない）
 const KIND_MARK: Color32 = hex(0xe2e5e9); // 外部・社内の仕組み・外部サービスは無彩色の淡い灰色
 const PROJECT_MARKS: [Color32; 2] = [hex(0xdce6f4), hex(0xe7dcf4)]; // 青と紫（明るさ・鮮やかさは同じで、色相だけ変える）
 const R_NODE: f32 = 6.0;
@@ -37,7 +38,7 @@ const fn hex(v: u32) -> Color32 {
     Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8)
 }
 
-fn status_color(kind: &str) -> Color32 {
+pub fn status_color(kind: &str) -> Color32 {
     match kind {
         "live" => hex(0x1a7f37),
         "wip" => hex(0x2f6fd0),
@@ -326,8 +327,37 @@ fn place_label(p: &Painter, crowd: &mut Crowd, text: &str, f: &FontId, pts: &[Po
     crowd.boxes.push((r, own));
 }
 
-pub fn diagram(p: &Painter, view: &View, lay: &Layout, changes: &serde_json::Value, cam: &Camera) {
+/// 何を見ているか（選んだ部品・マウスを乗せた部品と線）
+#[derive(Default)]
+pub struct Focus<'a> {
+    pub selected: Option<&'a str>,
+    pub hover_node: Option<&'a str>,
+    pub hover_edge: Option<usize>,
+    /// 骨格（ウォーキングスケルトン）以外を薄くする
+    pub bones_only: bool,
+}
+
+/// 部品の四角（画面の座標）
+pub fn node_rect(cam: &Camera, c: Pt) -> Rect {
     let s = cam.scale;
+    Rect::from_center_size(cam.xy(c), vec2(NODE_W as f32 * 72.0 * s, NODE_H as f32 * 72.0 * s))
+}
+
+/// 折れ線と点のいちばん近い距離
+pub fn distance_to(pts: &[Pos2], at: Pos2) -> f32 {
+    pts.windows(2)
+        .map(|s| {
+            let (a, b) = (s[0], s[1]);
+            let ab = b - a;
+            let t = if ab.length_sq() > 0.0 { ((at - a).dot(ab) / ab.length_sq()).clamp(0.0, 1.0) } else { 0.0 };
+            at.distance(a + ab * t)
+        })
+        .fold(f32::INFINITY, f32::min)
+}
+
+pub fn diagram(p: &Painter, view: &View, lay: &Layout, changes: &Changes, cam: &Camera, focus: &Focus) {
+    let s = cam.scale;
+    let fnode = focus.hover_node.or(focus.selected);
     let mut marks = PROJECT_MARKS.iter().cycle();
     let zone_mark: HashMap<&str, Color32> = view
         .zones
@@ -364,33 +394,56 @@ pub fn diagram(p: &Painter, view: &View, lay: &Layout, changes: &serde_json::Val
             p.text(r.min + vec2(16.0 * s, 33.0 * s), Align2::LEFT_TOP, &z.sub, font(9.0 * s, false), DIM);
         }
     }
-    // 線。普段は枠の中の線と、枠どうしをまとめた線だけ
+    // 線。普段は枠の中の線と、枠どうしをまとめた線だけ。部品を押す・乗せると、その部品の線を行き先まで出す
     let zone_of: HashMap<&str, &str> = view.nodes.iter().map(|n| (n.id.as_str(), n.zone.as_str())).collect();
+    let mine: Vec<usize> = (0..view.edges.len()).filter(|&i| fnode.is_some_and(|f| view.edges[i].from == f || view.edges[i].to == f)).collect();
+    let mut near: Vec<&str> = fnode.into_iter().collect();
+    near.extend(mine.iter().flat_map(|&i| [view.edges[i].from.as_str(), view.edges[i].to.as_str()]));
     let mut crowd = Crowd::default();
     let mut labels: Vec<(String, FontId, Vec<Pos2>, usize)> = vec![];
     for (bi, b) in lay.bundles.iter().enumerate() {
         let pts: Vec<Pos2> = b.points.iter().map(|q| cam.xy(*q)).collect();
+        let quiet = fnode.is_some() || focus.bones_only;
         crowd.lines.push((pts.clone(), 10_000 + bi));
-        polyline(p, pts.clone(), 2.0, EDGE, dash(&b.kind), &b.arrow, (9.0, 10.0, 4.0));
-        labels.push((format!("{} 本", b.edges.len()), font(9.0 * s, false), pts, 10_000 + bi));
+        let (w, c) = if quiet { (1.0, EDGE_QUIET) } else { (2.0, EDGE) };
+        polyline(p, pts.clone(), w, c, dash(&b.kind), &b.arrow, (9.0, 10.0, 4.0));
+        if !quiet {
+            labels.push((format!("{} 本", b.edges.len()), font(9.0 * s, false), pts, 10_000 + bi));
+        }
     }
     for (i, (e, path)) in view.edges.iter().zip(&lay.paths).enumerate() {
-        if zone_of[e.from.as_str()] != zone_of[e.to.as_str()] {
+        let strong = mine.contains(&i);
+        if zone_of[e.from.as_str()] != zone_of[e.to.as_str()] && !strong {
             continue; // 枠をまたぐ線は、まとめた線で出している
         }
         let pts: Vec<Pos2> = path.points.iter().map(|q| cam.xy(*q)).collect();
         let kind = if e.blocked.is_empty() { e.status.as_str() } else { "stop" };
+        let faded = (focus.bones_only && !e.skeleton) || (fnode.is_some() && !strong);
+        let color = if faded { EDGE_QUIET } else if strong { BONE } else { EDGE };
         crowd.lines.push((pts.clone(), 20_000 + i));
-        polyline(p, pts, 1.0, EDGE, dash(kind), "last", (8.0, 9.0, 3.0));
+        polyline(p, pts.clone(), if strong { 2.0 } else { 1.0 }, color, dash(kind), "last", (8.0, 9.0, 3.0));
+        if !e.label.is_empty() && (strong || focus.hover_edge == Some(i)) {
+            labels.push((e.label.clone(), font(9.0 * s, false), pts, 20_000 + i)); // 名札は、その線を見ているときだけ
+        }
     }
     // 部品: 白いカードに 1px の灰色。状態は「丸 + 文字」（色だけに頼らない）
     let sk = through(&view.nodes);
-    let (w, h) = (NODE_W as f32 * 72.0 * s, NODE_H as f32 * 72.0 * s);
+    let w = NODE_W as f32 * 72.0 * s;
     for (ni, n) in view.nodes.iter().enumerate() {
         let Some(&c) = lay.pos.get(&n.id) else { continue };
-        let r = Rect::from_center_size(cam.xy(c), vec2(w, h));
+        let r = node_rect(cam, c);
         crowd.boxes.push((r, ni));
         let kind = if n.blocked.is_empty() { n.status.as_str() } else { "stop" };
+        let sel = focus.selected == Some(n.id.as_str());
+        // 部品を選んでいるときは、つながっていない部品も薄くする（Ilograph の「関係ないものを隠す」に倣う）
+        let faded = (focus.bones_only && !n.skeleton) || (fnode.is_some() && !near.contains(&n.id.as_str()));
+        let (pad, sf, tf) = (12.0 * s, font(9.0 * s, false), font(10.0 * s, true));
+        if faded {
+            rounded(p, r, R_NODE * s, Some(BG), Some((1.0, EDGE_QUIET)), &[]);
+            p.text(pos2(r.min.x + pad, r.min.y + 15.0 * s), Align2::LEFT_CENTER, clip(p, &n.title, &tf, w - pad * 2.0 - 16.0 * s), tf, FAINT);
+            p.text(pos2(r.min.x + pad, r.max.y - 14.0 * s), Align2::LEFT_CENTER, clip(p, &n.sub, &sf, w - pad * 2.0 - 30.0 * s), sf, FAINT);
+            continue;
+        }
         if sk.next.as_deref() == Some(n.id.as_str()) {
             // 見どころは 1 か所だけ: 次に通す部品を紺の太い輪で囲む
             let g = 5.0 * s;
@@ -404,9 +457,8 @@ pub fn diagram(p: &Painter, view: &View, lay: &Layout, changes: &serde_json::Val
             "none" => TINT_NONE,
             _ => CARD,
         };
-        rounded(p, r, R_NODE * s, Some(fill), Some((1.0, CARD_LINE)), if kind == "none" { &[4.0, 3.0] } else { &[] });
-        let pad = 12.0 * s;
-        let (sf, tf) = (font(9.0 * s, false), font(10.0 * s, true));
+        let outline = if sel { (2.0, BONE) } else { (1.0, CARD_LINE) };
+        rounded(p, r, R_NODE * s, Some(fill), Some(outline), if kind == "none" && !sel { &[4.0, 3.0] } else { &[] });
         let word = if kind == "live" { "" } else { status_short(kind) }; // 本番は丸だけ（多数派なので文字を出すと題を削る）
         let ww = if word.is_empty() { 10.0 * s } else { measure(p, word, &sf) + 12.0 * s };
         let rad = 3.5 * s;
@@ -417,8 +469,7 @@ pub fn diagram(p: &Painter, view: &View, lay: &Layout, changes: &serde_json::Val
         p.text(pos2(r.min.x + pad, dy), Align2::LEFT_CENTER, title, tf, TEXT);
         let sub = clip(p, &n.sub, &sf, w - pad * 2.0 - 30.0 * s);
         p.text(pos2(r.min.x + pad, r.max.y - 14.0 * s), Align2::LEFT_CENTER, sub, sf, FAINT);
-        let moved = changes.get("nodes").and_then(|m| m.get(&n.id)).is_some_and(|v| !v.is_null() && v != &serde_json::Value::Bool(false));
-        if moved {
+        if changes.nodes.contains_key(&n.id) {
             // 前回から状態か待ちが変わった
             p.text(pos2(r.max.x - pad, r.max.y - 14.0 * s), Align2::RIGHT_CENTER, "変化", font(8.5 * s, true), BONE);
         }
@@ -445,11 +496,12 @@ pub fn diagram(p: &Painter, view: &View, lay: &Layout, changes: &serde_json::Val
     }
 }
 
-/// 上の帯（題と、何時の state か）
-pub fn header(p: &Painter, area: Rect, title: &str, meta: &str) {
+/// 上の帯（題・操作の案内・何時の state か）
+pub fn header(p: &Painter, area: Rect, title: &str, hint: &str, meta: &str) {
     let r = Rect::from_min_size(area.min, vec2(area.width(), HEAD_H));
     p.rect_filled(r, 0.0, PANEL);
     p.line_segment([pos2(r.min.x, r.max.y), pos2(r.max.x, r.max.y)], Stroke::new(1.0_f32, LINE));
     p.text(pos2(r.min.x + 14.0, r.center().y), Align2::LEFT_CENTER, title, font(12.0, true), TEXT);
-    p.text(pos2(r.max.x - 14.0, r.center().y), Align2::RIGHT_CENTER, meta, font(9.0, false), DIM);
+    let m = p.text(pos2(r.max.x - 14.0, r.center().y), Align2::RIGHT_CENTER, meta, font(9.0, false), DIM);
+    p.text(pos2(m.min.x - 24.0, r.center().y), Align2::RIGHT_CENTER, hint, font(9.0, false), FAINT);
 }

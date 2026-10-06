@@ -17,6 +17,8 @@ egui = { version = "0.34", features = ["default_fonts"] }
 egui_software_backend = { version = "0.0.3", optional = true }
 # GPU 版は glow（OpenGL）。既定の wgpu はビルドが重く、この PC のメモリでは落ちるおそれがある
 eframe = { version = "0.34", default-features = false, features = ["glow", "default_fonts"], optional = true }
+# コピー（arboard）と、リンクを既定のブラウザで開く（webbrowser）。CPU で描く部品は egui-winit をこれらなしで使うので足す
+egui-winit = { version = "0.34", default-features = false, features = ["clipboard", "links"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 

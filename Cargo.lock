@@ -97,6 +97,7 @@ version = "0.1.0"
 dependencies = [
  "eframe",
  "egui",
+ "egui-winit",
  "egui_software_backend",
  "serde",
  "serde_json",
