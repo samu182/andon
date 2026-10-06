@@ -2,8 +2,8 @@
 
 use crate::layout::{Layout, NODE_H, NODE_W, Pt};
 use crate::model::{View, through};
-use eframe::egui::{
-    self, Align2, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Painter, Pos2, Rect, Shape, Stroke, StrokeKind, pos2, vec2,
+use egui::{
+    Align2, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Painter, Pos2, Rect, Shape, Stroke, StrokeKind, pos2, vec2,
 };
 use std::collections::HashMap;
 use std::sync::Arc;

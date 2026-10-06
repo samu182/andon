@@ -3,9 +3,20 @@ name = "arch-view"
 version = "0.1.0"
 edition = "2024"
 
+# 描き方を 2 つから選ぶ（2026-10-06 に比べるために両方置いた）
+#   cpu（既定）: CPU で描く（egui_software_backend）。GPU のドライバーを読み込まないので軽い
+#   gpu: GPU で描く（eframe + glow）。cargo build --no-default-features --features gpu
+[features]
+default = ["cpu"]
+cpu = ["dep:egui_software_backend"]
+gpu = ["dep:eframe"]
+
 [dependencies]
-# 描く側は glow（OpenGL）。既定の wgpu はビルドが重く、この PC のメモリでは落ちるおそれがある（2026-10-06）
-eframe = { version = "0.36.2", default-features = false, features = ["glow", "default_fonts"] }
+# egui_software_backend が 0.34 なので、egui もそれにそろえる
+egui = { version = "0.34", features = ["default_fonts"] }
+egui_software_backend = { version = "0.0.3", optional = true }
+# GPU 版は glow（OpenGL）。既定の wgpu はビルドが重く、この PC のメモリでは落ちるおそれがある
+eframe = { version = "0.34", default-features = false, features = ["glow", "default_fonts"], optional = true }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 

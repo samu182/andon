@@ -2,6 +2,9 @@
 //!
 //!   arch-view                         窓を開く
 //!   arch-view --dump-layout <out> [aspect]   並べた結果を JSON で書く（Python の layout と突き合わせる）
+//!
+//! 環境変数 ARCH_BENCH=<書き出す先> を付けると、図を 1 画素ずつ動かしながら 180 回描き直し、
+//! 1 回あたりの時間を書き出して閉じる（CPU で描く版と GPU で描く版を比べるため）。
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -9,12 +12,16 @@ mod draw;
 mod layout;
 mod model;
 
-use eframe::egui;
 use layout::Layout;
 use model::{State, View};
 use std::sync::mpsc;
+use std::time::Instant;
 
-fn main() -> eframe::Result {
+const WIN_W: f32 = 1400.0;
+const WIN_H: f32 = 860.0;
+const BENCH_FRAMES: usize = 180;
+
+fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("--dump-layout") {
         let out = args.get(2).expect("書き出す先を渡す");
@@ -27,7 +34,38 @@ fn main() -> eframe::Result {
             Err(e) => serde_json::json!({ "error": e }).to_string(),
         };
         std::fs::write(out, body).expect("書き出せない");
-        return Ok(());
+        return;
+    }
+    run();
+}
+
+/// CPU で描く（既定）。GPU のドライバーを読み込まないので、空の窓が約 13 MB（GPU 版は約 97 MB・2026-10-06 に測った）
+#[cfg(feature = "cpu")]
+fn run() {
+    use egui_software_backend::{SoftwareBackend, SoftwareBackendAppConfiguration};
+
+    struct Cpu(Viewer);
+    impl egui_software_backend::App for Cpu {
+        fn ui(&mut self, ui: &mut egui::Ui, _backend: &mut SoftwareBackend) {
+            self.0.ui(ui);
+        }
+    }
+    let settings = SoftwareBackendAppConfiguration::new().inner_size(Some(egui::vec2(960.0, 600.0))).title(Some("構成図".into()));
+    egui_software_backend::run_app_with_software_backend(settings, |ctx: egui::Context| {
+        draw::setup_fonts(&ctx);
+        Cpu(Viewer::new(ctx))
+    })
+    .expect("窓を作れない");
+}
+
+/// GPU で描く（eframe + glow）
+#[cfg(all(feature = "gpu", not(feature = "cpu")))]
+fn run() {
+    struct Gpu(Viewer);
+    impl eframe::App for Gpu {
+        fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+            self.0.ui(ui);
+        }
     }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([960.0, 600.0]).with_title("構成図"),
@@ -38,12 +76,20 @@ fn main() -> eframe::Result {
         options,
         Box::new(|cc| {
             draw::setup_fonts(&cc.egui_ctx);
-            Ok(Box::new(App::new(cc.egui_ctx.clone())))
+            Ok(Box::new(Gpu(Viewer::new(cc.egui_ctx.clone()))))
         }),
     )
+    .expect("窓を作れない");
 }
 
-struct App {
+/// 描き直しの速さを測る（ARCH_BENCH）
+struct Bench {
+    out: String,
+    last: Option<Instant>,
+    times: Vec<f64>,
+}
+
+struct Viewer {
     state: Option<State>,
     view: Option<View>,
     lay: Option<Layout>,
@@ -52,47 +98,48 @@ struct App {
     pending: Option<mpsc::Receiver<Result<Layout, String>>>,
     /// 1 点 = 1 画素にしたか
     zoomed: bool,
+    bench: Option<Bench>,
 }
 
-impl App {
+impl Viewer {
     fn new(ctx: egui::Context) -> Self {
-        let mut app = App { state: None, view: None, lay: None, msg: String::new(), pending: None, zoomed: false };
+        let bench = std::env::var("ARCH_BENCH").ok().map(|out| Bench { out, last: None, times: vec![] });
+        let mut v = Viewer { state: None, view: None, lay: None, msg: String::new(), pending: None, zoomed: false, bench };
         match model::load_state() {
             Ok(st) => {
                 match &st.arch {
                     Some(a) => {
                         let view = model::view_all(a);
                         let (tx, rx) = mpsc::channel();
-                        let v = view.clone();
+                        let copy = view.clone();
                         std::thread::spawn(move || {
-                            let _ = tx.send(layout::layout(&v, 1.6));
+                            let _ = tx.send(layout::layout(&copy, 1.6));
                             ctx.request_repaint();
                         });
-                        app.view = Some(view);
-                        app.pending = Some(rx);
-                        app.msg = "並べている".into();
+                        v.view = Some(view);
+                        v.pending = Some(rx);
+                        v.msg = "並べている".into();
                     }
-                    None => app.msg = "構成図の宣言が無い（~/.herdr/kanban-data/<project>/arch.json）".into(),
+                    None => v.msg = "構成図の宣言が無い（~/.herdr/kanban-data/<project>/arch.json）".into(),
                 }
-                app.state = Some(st);
+                v.state = Some(st);
             }
-            Err(e) => app.msg = format!("読めない: {e}"),
+            Err(e) => v.msg = format!("読めない: {e}"),
         }
-        app
+        v
     }
-}
 
-impl eframe::App for App {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
         if !self.zoomed {
             // 大きさは Python 版と同じく実際の画素で決める（1 点 = 1 画素、窓は 1400×860 画素）。
             // Windows の拡大率（この PC は 150%）をかけると、窓が画面より大きくなった（2026-10-06）。
-                // 窓の大きさの指示は拡大率をかけた単位で受け取られるので、拡大率で割って渡す
-            if let Some(ppp) = ui.ctx().native_pixels_per_point() {
-                ui.ctx().set_zoom_factor(1.0 / ppp);
-                ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(1400.0, 860.0) / ppp));
+            // 窓の大きさの指示は拡大率をかけた単位で受け取られるので、拡大率で割って渡す
+            if let Some(ppp) = ctx.native_pixels_per_point() {
+                ctx.set_zoom_factor(1.0 / ppp);
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(WIN_W, WIN_H) / ppp));
                 self.zoomed = true;
-                ui.ctx().request_repaint();
+                ctx.request_repaint();
             }
         }
         if let Some(rx) = &self.pending {
@@ -112,7 +159,10 @@ impl eframe::App for App {
         let body = egui::Rect::from_min_max(area.min + egui::vec2(0.0, draw::HEAD_H), area.max);
         draw::paper(p, body);
         if let (Some(view), Some(lay), Some(st)) = (&self.view, &self.lay, &self.state) {
-            let cam = draw::Camera::fit(body, lay);
+            let mut cam = draw::Camera::fit(body, lay);
+            if let Some(b) = &self.bench {
+                cam.origin.x += b.times.len() as f32; // 引きずって動かしているのと同じ描き直し
+            }
             let changes = st.arch.as_ref().map(|a| &a.changes).unwrap_or(&serde_json::Value::Null);
             draw::diagram(&p.with_clip_rect(body), view, lay, changes, &cam);
         }
@@ -123,5 +173,31 @@ impl eframe::App for App {
             _ => self.msg.clone(),
         };
         draw::header(p, area, "構成図 — 全体", &meta);
+        self.bench_tick(&ctx, body);
+    }
+
+    /// 図が出て窓が 1400 画素幅になってから、毎回の間隔を測る。最初の 10 回は捨てる
+    fn bench_tick(&mut self, ctx: &egui::Context, body: egui::Rect) {
+        let ready = self.lay.is_some() && body.width() >= WIN_W - 2.0;
+        let Some(b) = &mut self.bench else { return };
+        if !ready {
+            ctx.request_repaint();
+            return;
+        }
+        let now = Instant::now();
+        if let Some(last) = b.last {
+            b.times.push((now - last).as_secs_f64() * 1000.0);
+        }
+        b.last = Some(now);
+        if b.times.len() < BENCH_FRAMES + 10 {
+            ctx.request_repaint();
+            return;
+        }
+        let mut t: Vec<f64> = b.times[10..].to_vec();
+        t.sort_by(f64::total_cmp);
+        let avg = t.iter().sum::<f64>() / t.len() as f64;
+        let p95 = t[t.len() * 95 / 100];
+        let _ = std::fs::write(&b.out, format!("{{\"avg_ms\": {avg:.2}, \"p95_ms\": {p95:.2}, \"frames\": {}}}", t.len()));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 }
