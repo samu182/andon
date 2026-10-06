@@ -1,0 +1,13 @@
+[package]
+name = "arch-view"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# 描く側は glow（OpenGL）。既定の wgpu はビルドが重く、この PC のメモリでは落ちるおそれがある（2026-10-06）
+eframe = { version = "0.36.2", default-features = false, features = ["glow", "default_fonts"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+
+[profile.release]
+opt-level = 2
