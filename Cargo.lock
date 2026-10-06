@@ -99,6 +99,7 @@ dependencies = [
  "egui",
  "egui-winit",
  "egui_software_backend",
+ "memmap2",
  "serde",
  "serde_json",
 ]

@@ -83,7 +83,12 @@ fn run(scope: String, listener: std::net::TcpListener) {
             self.0.ui(ui);
         }
     }
-    let settings = SoftwareBackendAppConfiguration::new().inner_size(Some(egui::vec2(960.0, 600.0))).title(Some("構成図".into()));
+    // 描いた絵をためておく仕組み（caching）は切る。図を動かすたびに作り直すので、約 37 MB 使ったうえに遅かった
+    // （描き直し 1 回 25.5 ms → 切ると 20.0 ms・2026-10-06 に測った）
+    let settings = SoftwareBackendAppConfiguration::new()
+        .inner_size(Some(egui::vec2(960.0, 600.0)))
+        .title(Some("構成図".into()))
+        .caching(false);
     egui_software_backend::run_app_with_software_backend(settings, |ctx: egui::Context| {
         draw::setup_fonts(&ctx);
         Cpu(Viewer::new(ctx, scope.clone(), Some(listener.try_clone().expect("口を写せない"))))

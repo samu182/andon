@@ -73,8 +73,11 @@ fn dash(kind: &str) -> &'static [f32] {
 pub fn setup_fonts(ctx: &egui::Context) {
     let mut defs = FontDefinitions::default();
     let mut add = |name: &str, file: &str, index: u32| {
-        let Ok(bytes) = std::fs::read(format!(r"C:\Windows\Fonts\{file}")) else { return false };
-        let mut data = FontData::from_owned(bytes);
+        // ファイルを写さずに、そのまま割り当てて読む（写すと 2 つで約 10 MB を自分の分として使った・2026-10-06）
+        let Ok(f) = std::fs::File::open(format!(r"C:\Windows\Fonts\{file}")) else { return false };
+        let Ok(map) = (unsafe { memmap2::Mmap::map(&f) }) else { return false };
+        let bytes: &'static [u8] = Box::leak(Box::new(map)); // 窓を閉じるまで使う
+        let mut data = FontData::from_static(bytes);
         data.index = index;
         defs.font_data.insert(name.to_string(), Arc::new(data));
         true

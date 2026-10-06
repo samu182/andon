@@ -21,6 +21,7 @@ eframe = { version = "0.34", default-features = false, features = ["glow", "defa
 egui-winit = { version = "0.34", default-features = false, features = ["clipboard", "links"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+memmap2 = "0.9.11"
 
 [profile.release]
 opt-level = 2
