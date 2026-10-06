@@ -1,7 +1,7 @@
 //! 描く。arch_view.py の redraw の写し（見た目の決まりは向こうのコメントが正本）。
 
 use crate::layout::{Layout, NODE_H, NODE_W, Pt, ZONE_HEAD};
-use crate::model::{Changes, View, through};
+use crate::model::{Changes, View, bones, through};
 use egui::{
     Align2, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Painter, Pos2, Rect, Shape, Stroke, StrokeKind, pos2, vec2,
 };
@@ -33,6 +33,7 @@ const R_NODE: f32 = 6.0;
 const R_ZONE: f32 = 10.0;
 const DOT_STEP: f32 = 22.0;
 pub const HEAD_H: f32 = 44.0;
+pub const STRIP_H: f32 = 64.0;
 
 const fn hex(v: u32) -> Color32 {
     Color32::from_rgb((v >> 16) as u8, (v >> 8) as u8, v as u8)
@@ -524,4 +525,69 @@ pub fn header(p: &Painter, area: Rect, title: &str, hint: &str, meta: &str) {
     p.text(pos2(r.min.x + 14.0, r.center().y), Align2::LEFT_CENTER, title, font(12.0, true), TEXT);
     let m = p.text(pos2(r.max.x - 14.0, r.center().y), Align2::RIGHT_CENTER, meta, font(9.0, false), DIM);
     p.text(pos2(m.min.x - 24.0, r.center().y), Align2::RIGHT_CENTER, hint, font(9.0, false), FAINT);
+}
+
+/// 下の帯で押せるもの
+pub enum StripHit {
+    /// 出す骨格を次のプロジェクトへ（全体で、骨格が 2 つ以上あるとき）
+    Owner,
+    Node(String),
+}
+
+/// 下の帯。骨格の部品を番号順に並べる。切れ目なく本番の所までは濃く、その先は薄く。押すとその部品へ。
+/// 返すのは押せる所
+pub fn strip(p: &Painter, r: Rect, view: &View, selected: Option<&str>) -> Vec<(Rect, StripHit)> {
+    p.rect_filled(r, 0.0, PANEL);
+    p.line_segment([r.left_top(), r.right_top()], Stroke::new(1.0_f32, LINE));
+    let mut hits = vec![];
+    let bones = bones(&view.nodes);
+    if bones.is_empty() {
+        p.text(pos2(r.min.x + 16.0, r.min.y + 32.0), Align2::LEFT_CENTER,
+               "この範囲にはウォーキングスケルトンが無い（計画書の ◆ の項目か、宣言の step で決まる）", font(9.0, false), FAINT);
+        return hits;
+    }
+    let sk = through(&view.nodes); // 個数ではなく、端から切れ目なく本番の所まで
+    let many = view.owners.len() > 1;
+    let owner = view.owner.as_deref().unwrap_or("");
+    let o = p.text(pos2(r.min.x + 16.0, r.min.y + 22.0), Align2::LEFT_CENTER, format!("{owner} の骨格{}", if many { " ›" } else { "" }),
+                   font(9.0, true), if many { BONE } else { FAINT });
+    if many {
+        hits.push((o.expand(4.0), StripHit::Owner));
+    }
+    let value = if sk.next.is_none() { "全部本番".to_string() } else { format!("{} 番まで本番", sk.through) };
+    let head = p.text(pos2(r.min.x + 16.0, r.min.y + 41.0), Align2::LEFT_CENTER, format!("{value} / 全 {}", bones.len()), font(10.0, true), TEXT);
+    let x0 = head.max.x.max(r.min.x + 150.0) + 24.0;
+    let f = font(9.0, false);
+    let n = bones.len() as f32;
+    let each = (r.max.x - 16.0 - x0 - 12.0 * (n - 1.0)) / n; // 1 つあたりに使える幅
+    let mut x = x0;
+    for (i, b) in bones.iter().enumerate() {
+        let cw = (measure(p, &b.title, &f) + 42.0).min(each).max(36.0);
+        let sel = selected == Some(b.id.as_str());
+        let done = b.step.unwrap() <= sk.through;
+        let chip = Rect::from_min_max(pos2(x, r.min.y + 18.0), pos2(x + cw, r.min.y + 46.0));
+        pill(p, chip, if sel { BONE } else { PANEL }, if sel { BONE } else { LINE });
+        let c = pos2(x + 15.0, r.min.y + 32.0);
+        let (fill, ring) = match (sel, done) {
+            (true, true) => (WHITE, WHITE),
+            (true, false) => (PANEL, WHITE),
+            (false, true) => (BONE, BONE),
+            (false, false) => (PANEL, BONE),
+        };
+        p.circle(c, 8.0, fill, Stroke::new(1.0_f32, ring));
+        let num = if done { if sel { BONE } else { WHITE } } else { BONE };
+        p.text(c, Align2::CENTER_CENTER, b.step.unwrap().to_string(), num_font(8.0), num);
+        let ink = if sel { WHITE } else if done { TEXT } else { FAINT };
+        p.text(pos2(x + 29.0, c.y), Align2::LEFT_CENTER, clip(p, &b.title, &f, cw - 36.0), f.clone(), ink);
+        if sk.next.as_deref() == Some(b.id.as_str()) {
+            // 次に通す部品
+            p.text(pos2(x + cw / 2.0, r.min.y + 9.0), Align2::CENTER_CENTER, "次はここ", font(8.0, true), BONE);
+        }
+        if i + 1 < bones.len() {
+            p.text(pos2(x + cw + 6.0, c.y), Align2::CENTER_CENTER, "›", font(10.0, false), FAINT);
+        }
+        hits.push((chip, StripHit::Node(b.id.clone())));
+        x += cw + 12.0;
+    }
+    hits
 }

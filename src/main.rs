@@ -42,7 +42,7 @@ fn main() {
         let max_rows = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(1);
         let body = match model::load_state().and_then(|st| {
             let a = st.arch.ok_or("arch が無い")?;
-            layout::layout(&model::view_all(&a), aspect, max_rows)
+            layout::layout(&model::view_all(&a, None), aspect, max_rows)
         }) {
             Ok(lay) => serde_json::to_string(&lay).unwrap(),
             Err(e) => serde_json::json!({ "error": e }).to_string(),
@@ -166,6 +166,15 @@ struct Viewer {
     side: side::Side,
     /// 上の帯に少しのあいだ出す知らせ（コピーした、など）
     flash: Option<(String, Instant)>,
+    /// s で、ウォーキングスケルトン以外を薄くする
+    bones_only: bool,
+    /// 骨格をたどっているときの番号（bones の添字）と、再生で次に進む時刻
+    flow: Option<usize>,
+    playing: Option<Instant>,
+    /// 全体で、帯の名前を押して選んだ骨格のプロジェクト
+    picked: Option<String>,
+    /// 図を描いている所（骨格をたどるときに、部品が見えているかを調べる）
+    canvas: egui::Rect,
 }
 
 impl Viewer {
@@ -193,12 +202,17 @@ impl Viewer {
             hover_edge: None,
             side: side::Side::default(),
             flash: None,
+            bones_only: false,
+            flow: None,
+            playing: None,
+            picked: None,
+            canvas: egui::Rect::NOTHING,
         };
         match model::load_state() {
             Ok(st) => {
                 match &st.arch {
                     Some(a) => {
-                        v.view = Some(model::view_all(a));
+                        v.view = Some(model::view_all(a, None));
                         v.msg = "並べている".into();
                     }
                     None => v.msg = "構成図の宣言が無い（~/.herdr/kanban-data/<project>/arch.json）".into(),
@@ -252,9 +266,28 @@ impl Viewer {
         }
         let area = ui.max_rect();
         let p = ui.painter().clone();
-        let body = egui::Rect::from_min_max(area.min + egui::vec2(0.0, draw::HEAD_H), area.max);
+        // 下の帯（窓の幅いっぱい）: ウォーキングスケルトンを通る順に部品を並べ、どこまで本番で通ったかを一目で見せる
+        let strip = egui::Rect::from_min_max(egui::pos2(area.min.x, area.max.y - draw::STRIP_H), area.max);
+        let body = egui::Rect::from_min_max(area.min + egui::vec2(0.0, draw::HEAD_H), egui::pos2(area.max.x, strip.min.y));
         draw::paper(&p, body);
-        let (f_key, esc, r_key) = ui.input(|i| (i.key_pressed(egui::Key::F), i.key_pressed(egui::Key::Escape), i.key_pressed(egui::Key::R)));
+        let keys = ui.input(|i| {
+            use egui::Key;
+            [Key::F, Key::Escape, Key::R, Key::S, Key::ArrowRight, Key::ArrowLeft, Key::Space].map(|k| i.key_pressed(k))
+        });
+        let [f_key, esc, r_key, s_key, right, left, space] = keys;
+        if s_key {
+            self.bones_only = !self.bones_only; // s: 骨格（ウォーキングスケルトン）以外を薄くする
+        }
+        if right {
+            self.flow_go(1);
+        }
+        if left {
+            self.flow_go(-1);
+        }
+        if space {
+            self.flow_play();
+        }
+        self.flow_tick(&ctx);
         if r_key {
             self.rebuild_if_old(true); // r: 今すぐ組み立て直す（20 秒に 1 回まで）
         }
@@ -262,11 +295,12 @@ impl Viewer {
             self.moved = false; // f: 全体を収め直す
         }
         if esc {
-            (self.selected, self.bundle) = (None, None);
+            (self.selected, self.bundle, self.flow, self.playing) = (None, None, None, None); // 骨格をたどるのも終わる
         }
         let side_open = self.selected.is_some() || self.bundle.is_some();
         // 右の欄は図の上に重ねる（出し入れで図の倍率を変えない。選ぶたびに図が縮むと見失う）
         let canvas = if side_open { egui::Rect::from_min_max(body.min, egui::pos2(body.max.x - side::WIDTH, body.max.y)) } else { body };
+        self.canvas = canvas;
         let resp = ui.interact(canvas, egui::Id::new("canvas"), egui::Sense::click_and_drag());
         if let (Some(view), Some(lay), Some(st)) = (&self.view, &self.lay, &self.state) {
             if !self.moved || self.cam.is_none() {
@@ -324,11 +358,13 @@ impl Viewer {
                 selected: self.selected.as_deref(),
                 hover_node: self.hover_node.as_deref(),
                 hover_edge: self.hover_edge,
-                bones_only: false,
+                bones_only: self.bones_only,
             };
-            let changes = st.arch.as_ref().map(|a| a.changes.clone()).unwrap_or_default();
-            draw::diagram(&p.with_clip_rect(body), view, lay, &changes, &shown, &focus);
+            let none = model::Changes::default();
+            let changes = st.arch.as_ref().map_or(&none, |a| &a.changes);
+            draw::diagram(&p.with_clip_rect(body), view, lay, changes, &shown, &focus);
         }
+        self.strip(ui, &p, strip);
         if side_open {
             self.side_panel(ui, body);
         }
@@ -342,8 +378,102 @@ impl Viewer {
             }
             _ => self.msg.clone(),
         };
-        draw::header(&p, area, "構成図 — 全体", "押すと詳しく　ドラッグで移動　ホイールで拡大　f 全体　r 更新　Esc 選ぶのをやめる", &meta);
+        draw::header(&p, area, "構成図 — 全体", "押すと詳しく　f 全体　s 骨格だけ　← → 骨格をたどる　r 更新", &meta);
         self.bench_tick(&ctx, body);
+    }
+
+    /// 下の帯を描き、押されたら: 名前 → 出す骨格を次のプロジェクトへ / 部品 → その部品を選んで図の真ん中へ
+    fn strip(&mut self, ui: &mut egui::Ui, p: &egui::Painter, r: egui::Rect) {
+        let Some(view) = &self.view else {
+            p.rect_filled(r, 0.0, draw::PANEL);
+            return;
+        };
+        let hits = draw::strip(p, r, view, self.selected.as_deref());
+        let resp = ui.interact(r, egui::Id::new("strip"), egui::Sense::click());
+        let at = resp.hover_pos();
+        let over = at.and_then(|at| hits.iter().find(|h| h.0.contains(at)));
+        if over.is_some() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if !resp.clicked() {
+            return;
+        }
+        match over.map(|h| &h.1) {
+            Some(draw::StripHit::Owner) => {
+                let i = view.owners.iter().position(|o| Some(o) == view.owner.as_ref()).map_or(0, |i| (i + 1) % view.owners.len());
+                self.picked = view.owners.get(i).cloned();
+                self.flow = None;
+                if let Some(a) = self.state.as_ref().and_then(|st| st.arch.as_ref()) {
+                    self.view = Some(model::view_all(a, self.picked.as_deref())); // 骨格の番号だけ変わる（並べ方はそのまま）
+                }
+            }
+            Some(draw::StripHit::Node(id)) => {
+                let id = id.clone();
+                (self.selected, self.bundle) = (Some(id.clone()), None);
+                self.center_on(&id, true);
+            }
+            None => {}
+        }
+    }
+
+    /// その部品を図の真ん中へ（always でなければ、見えていないときだけ）
+    fn center_on(&mut self, id: &str, always: bool) {
+        let (Some(lay), Some(cam)) = (&self.lay, &mut self.cam) else { return };
+        let Some(&c) = lay.pos.get(id) else { return };
+        let at = cam.xy(c);
+        if always || !self.canvas.shrink(40.0).contains(at) {
+            cam.origin += self.canvas.center() - at;
+            self.moved = true;
+        }
+    }
+
+    /// 骨格を 1 つ進める・戻す。その部品を選んだ状態にして、出入りする線を出す
+    fn flow_go(&mut self, d: i32) -> Option<String> {
+        let ids: Vec<String> = model::bones(&self.view.as_ref()?.nodes).iter().map(|n| n.id.clone()).collect();
+        if ids.is_empty() {
+            return None;
+        }
+        let i = match self.flow {
+            None => 0,
+            Some(f) => (f as i32 + d).clamp(0, ids.len() as i32 - 1) as usize,
+        };
+        self.flow = Some(i);
+        (self.selected, self.bundle) = (Some(ids[i].clone()), None);
+        self.center_on(&ids[i], false); // 見えていなければ真ん中へ
+        Some(ids[i].clone())
+    }
+
+    /// Space: 骨格を 1 番から順にたどる。本番でない部品に来たら、そこで止まる（次に通す所）。もう一度押すと止める
+    fn flow_play(&mut self) {
+        if self.playing.take().is_some() {
+            return;
+        }
+        let n = self.view.as_ref().map_or(0, |v| model::bones(&v.nodes).len());
+        if self.flow.is_none_or(|f| f + 1 >= n) {
+            self.flow = None;
+        }
+        self.flow_step();
+    }
+
+    fn flow_step(&mut self) {
+        let d = if self.flow.is_some() { 1 } else { 0 };
+        let Some(id) = self.flow_go(d) else {
+            self.playing = None;
+            return;
+        };
+        let view = self.view.as_ref().unwrap();
+        let n = view.nodes.iter().find(|n| n.id == id).unwrap();
+        let last = self.flow.is_some_and(|f| f + 1 >= model::bones(&view.nodes).len());
+        self.playing = (n.status == "live" && n.blocked.is_empty() && !last).then(|| Instant::now() + std::time::Duration::from_millis(1100));
+    }
+
+    fn flow_tick(&mut self, ctx: &egui::Context) {
+        let Some(at) = self.playing else { return };
+        if Instant::now() >= at {
+            self.flow_step();
+        } else {
+            ctx.request_repaint_after(at - Instant::now());
+        }
     }
 
     /// 右の欄（部品か、まとめた線を選んだときだけ）
@@ -384,7 +514,7 @@ impl Viewer {
     fn start_layout(&mut self, view: View) {
         let (tx, rx) = mpsc::channel();
         let ctx = self.ctx.clone();
-        let aspect = (self.size.x / (self.size.y - draw::HEAD_H)) as f64;
+        let aspect = (self.size.x / (self.size.y - draw::HEAD_H - draw::STRIP_H)) as f64;
         std::thread::spawn(move || {
             let lay = layout::layout(&view, aspect, MAX_ROWS);
             let _ = tx.send((view, lay));
@@ -409,7 +539,7 @@ impl Viewer {
         match model::load_state() {
             Ok(st) => {
                 if let Some(a) = &st.arch {
-                    let view = model::view_all(a);
+                    let view = model::view_all(a, self.picked.as_deref());
                     let same = self.pending.is_none() && self.lay.is_some() && self.view.as_ref().is_some_and(|v| shape(v) == shape(&view));
                     if same {
                         self.view = Some(view);
@@ -553,6 +683,7 @@ mod tests {
             nodes: vec![node("a"), node("b")],
             edges: vec![Edge { from: "a".into(), to: "b".into(), status: "live".into(), ..Default::default() }],
             owner: None,
+            owners: vec![],
         };
         let lay = Layout {
             pos: [("a".to_string(), (100.0, 100.0)), ("b".to_string(), (500.0, 100.0))].into_iter().collect(),
@@ -579,4 +710,49 @@ mod tests {
         assert!(matches!(hit(&view, &lay, &cam, egui::pos2(300.0, 103.0), None), Some(Hit::Edge(0))));
         assert!(hit(&view, &lay, &cam, egui::pos2(300.0, 110.0), None).is_none());
     }
+
+    /// 骨格が 3 つ（1・2 は本番、3 は作りかけ）の state を読ませた Viewer
+    fn flow_viewer() -> Viewer {
+        let dir = std::env::temp_dir().join("arch-view-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.json");
+        let node = |id: &str, step: u32, status: &str| {
+            serde_json::json!({ "id": id, "zone": "z", "title": id, "status": status, "blocked": "", "steps": { "p": step } })
+        };
+        let state = serde_json::json!({
+            "generated_at": "2026-10-06T00:00:00",
+            "arch": { "zones": [{ "id": "z" }], "nodes": [node("c", 3, "wip"), node("a", 1, "live"), node("b", 2, "live")], "edges": [] }
+        });
+        std::fs::write(&path, state.to_string()).unwrap();
+        unsafe { std::env::set_var("ARCH_STATE", &path) };
+        Viewer::new(egui::Context::default())
+    }
+
+    #[test]
+    fn 矢印で骨格を番号順にたどり_端で止まる() {
+        let mut v = flow_viewer();
+        assert_eq!(v.flow_go(1).as_deref(), Some("a")); // 初めは 1 番から
+        assert_eq!(v.flow_go(1).as_deref(), Some("b"));
+        assert_eq!(v.flow_go(1).as_deref(), Some("c"));
+        assert_eq!(v.flow_go(1).as_deref(), Some("c")); // 最後より先へは行かない
+        assert_eq!(v.flow_go(-1).as_deref(), Some("b"));
+        assert_eq!(v.selected.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn 再生は本番でない部品で止まる() {
+        let mut v = flow_viewer();
+        let ctx = egui::Context::default();
+        v.flow_play();
+        assert_eq!(v.selected.as_deref(), Some("a"));
+        for _ in 0..5 {
+            if v.playing.is_some() {
+                v.playing = Some(Instant::now()); // 1.1 秒待たずに進める
+                v.flow_tick(&ctx);
+            }
+        }
+        assert_eq!(v.selected.as_deref(), Some("c")); // 作りかけの 3 番で止まる
+        assert!(v.playing.is_none());
+    }
 }
+

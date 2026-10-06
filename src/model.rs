@@ -189,30 +189,38 @@ pub struct View {
     pub edges: Vec<Edge>,
     /// 出している骨格のプロジェクト
     pub owner: Option<String>,
+    /// 骨格を持っているプロジェクト（全体では、帯の名前を押して切り替える）
+    pub owners: Vec<String>,
 }
 
-/// 全体の view。骨格は最初のプロジェクトのものを出す（arch_view.py の rebuild で scope が全体のとき）。
-pub fn view_all(a: &Arch) -> View {
-    let owners: std::collections::BTreeSet<&String> = a.nodes.iter().flat_map(|n| n.steps.keys()).collect();
-    let owner = owners.iter().next().map(|s| s.to_string());
+/// 全体の view。骨格は picked のプロジェクトのもの（無ければ最初のもの）を出す（arch_view.py の rebuild で scope が全体のとき）。
+/// 部品は写しにして、出す骨格の番号だけを step に入れる
+pub fn view_all(a: &Arch, picked: Option<&str>) -> View {
+    let owners: Vec<String> = a.nodes.iter().flat_map(|n| n.steps.keys()).cloned().collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+    let owner = picked.filter(|p| owners.iter().any(|o| o == p)).map(str::to_string).or_else(|| owners.first().cloned());
     let nodes = a
         .nodes
         .iter()
         .map(|n| Node { step: owner.as_ref().and_then(|o| n.steps.get(o).copied()), ..n.clone() })
         .collect();
-    View { zones: a.zones.clone(), nodes, edges: a.edges.clone(), owner }
+    View { zones: a.zones.clone(), nodes, edges: a.edges.clone(), owner, owners }
 }
 
 pub struct Through {
     pub through: u32,
-    pub total: usize,
     pub next: Option<String>,
+}
+
+/// 骨格の部品を番号順に
+pub fn bones(nodes: &[Node]) -> Vec<&Node> {
+    let mut b: Vec<&Node> = nodes.iter().filter(|n| n.step.is_some()).collect();
+    b.sort_by_key(|n| n.step);
+    b
 }
 
 /// arch.py の through の写し。骨格が端から何番まで切れ目なく本番で通っているか。
 pub fn through(nodes: &[Node]) -> Through {
-    let mut bones: Vec<&Node> = nodes.iter().filter(|n| n.step.is_some()).collect();
-    bones.sort_by_key(|n| n.step);
+    let bones = bones(nodes);
     let mut k = 0;
     for n in &bones {
         if n.status != "live" || !n.blocked.is_empty() {
@@ -221,5 +229,5 @@ pub fn through(nodes: &[Node]) -> Through {
         k = n.step.unwrap();
     }
     let next = bones.iter().find(|n| n.step.unwrap() > k).map(|n| n.id.clone());
-    Through { through: k, total: bones.len(), next }
+    Through { through: k, next }
 }
