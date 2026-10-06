@@ -152,7 +152,11 @@ pub struct State {
     pub projects: HashMap<String, Project>,
 }
 
+/// 読む state。環境変数 ARCH_STATE で差し替えられる（写しを書き換えて、追いつくかを確かめるため）
 pub fn state_path() -> PathBuf {
+    if let Some(p) = std::env::var_os("ARCH_STATE") {
+        return PathBuf::from(p);
+    }
     let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).unwrap_or_default();
     PathBuf::from(home).join(".herdr").join("kanban-state.json")
 }

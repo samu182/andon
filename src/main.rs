@@ -27,6 +27,11 @@ const SCREEN_W: f32 = 0.92;
 const SCREEN_H: f32 = 0.90;
 /// 枠を並べる段の上限
 const MAX_ROWS: usize = 3;
+/// state のファイルを見に行く間隔
+const POLL: std::time::Duration = std::time::Duration::from_secs(2);
+/// 組み立て（board.py build）を頼む決まりは、カンバンの画面と同じ: 90 秒（＋余裕 10 秒）より古ければ、20 秒に 1 回まで、重ねない
+const REBUILD_EVERY: u64 = 100;
+const REBUILD_AT_LEAST: u64 = 20;
 const BENCH_FRAMES: usize = 180;
 
 fn main() {
@@ -135,8 +140,15 @@ struct Viewer {
     view: Option<View>,
     lay: Option<Layout>,
     msg: String,
-    /// 裏で並べている最中の結果の受け口（Graphviz に数百ミリ秒かかるので、窓の糸では待たない）
-    pending: Option<mpsc::Receiver<Result<Layout, String>>>,
+    /// 裏で並べている最中の結果の受け口（Graphviz に数百ミリ秒かかるので、窓の糸では待たない）。
+    /// 中身（View）と並べ方は必ず組で入れ替える
+    pending: Option<mpsc::Receiver<(View, Result<Layout, String>)>>,
+    /// 読んだ state のファイルの更新時刻
+    state_mtime: Option<std::time::SystemTime>,
+    last_poll: Option<Instant>,
+    /// 裏で頼んだ組み立てと、頼んだ時刻
+    builder: Option<std::process::Child>,
+    asked_at: Option<Instant>,
     /// 1 点 = 1 画素にしたか
     zoomed: bool,
     /// 窓の中の大きさ（画素）
@@ -165,6 +177,10 @@ impl Viewer {
             lay: None,
             msg: String::new(),
             pending: None,
+            state_mtime: state_mtime(),
+            last_poll: Some(Instant::now()),
+            builder: None,
+            asked_at: None,
             zoomed: false,
             size: egui::vec2(WIN_W, WIN_H),
             ctx,
@@ -212,17 +228,22 @@ impl Viewer {
                 }
                 ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(self.size / ppp));
                 self.zoomed = true;
-                self.start_layout();
+                if let Some(view) = self.view.clone() {
+                    self.start_layout(view);
+                }
                 ctx.request_repaint();
             }
         }
+        self.poll();
+        ctx.request_repaint_after(POLL); // 何も触っていなくても、state を見に行けるように
         if let Some(rx) = &self.pending {
-            if let Ok(r) = rx.try_recv() {
+            if let Ok((view, r)) = rx.try_recv() {
                 match r {
                     Ok(lay) => {
-                        self.lay = Some(lay);
+                        (self.view, self.lay) = (Some(view), Some(lay));
                         self.msg.clear();
                         self.moved = false;
+                        self.forget_missing();
                     }
                     Err(e) => self.msg = format!("並べられない: {e}"),
                 }
@@ -233,7 +254,10 @@ impl Viewer {
         let p = ui.painter().clone();
         let body = egui::Rect::from_min_max(area.min + egui::vec2(0.0, draw::HEAD_H), area.max);
         draw::paper(&p, body);
-        let (f_key, esc) = ui.input(|i| (i.key_pressed(egui::Key::F), i.key_pressed(egui::Key::Escape)));
+        let (f_key, esc, r_key) = ui.input(|i| (i.key_pressed(egui::Key::F), i.key_pressed(egui::Key::Escape), i.key_pressed(egui::Key::R)));
+        if r_key {
+            self.rebuild_if_old(true); // r: 今すぐ組み立て直す（20 秒に 1 回まで）
+        }
         if f_key {
             self.moved = false; // f: 全体を収め直す
         }
@@ -318,7 +342,7 @@ impl Viewer {
             }
             _ => self.msg.clone(),
         };
-        draw::header(&p, area, "構成図 — 全体", "押すと詳しく　ドラッグで移動　ホイールで拡大　f 全体　Esc 選ぶのをやめる", &meta);
+        draw::header(&p, area, "構成図 — 全体", "押すと詳しく　ドラッグで移動　ホイールで拡大　f 全体　r 更新　Esc 選ぶのをやめる", &meta);
         self.bench_tick(&ctx, body);
     }
 
@@ -355,17 +379,92 @@ impl Viewer {
         }
     }
 
-    /// 裏で並べる（Graphviz に数百ミリ秒かかるので、窓の糸では待たない）。窓の形に合わせて段を選ぶ
-    fn start_layout(&mut self) {
-        let Some(view) = &self.view else { return };
+    /// 裏で並べる（Graphviz に数百ミリ秒かかるので、窓の糸では待たない）。窓の形に合わせて段を選ぶ。
+    /// 並べ終わるまでは前の図のまま。待っているあいだに次の中身が来たら、前の結果は捨てる（受け口ごと替える）
+    fn start_layout(&mut self, view: View) {
         let (tx, rx) = mpsc::channel();
-        let (copy, ctx) = (view.clone(), self.ctx.clone());
+        let ctx = self.ctx.clone();
         let aspect = (self.size.x / (self.size.y - draw::HEAD_H)) as f64;
         std::thread::spawn(move || {
-            let _ = tx.send(layout::layout(&copy, aspect, MAX_ROWS));
+            let lay = layout::layout(&view, aspect, MAX_ROWS);
+            let _ = tx.send((view, lay));
             ctx.request_repaint();
         });
         self.pending = Some(rx);
+    }
+
+    /// state のファイルを 2 秒ごとに見て、変わっていれば読み直す。
+    /// 部品・枠・待ち・線の組み合わせが変わったときだけ並べ直す（状態が変わっただけなら、並べ方はそのまま）
+    fn poll(&mut self) {
+        if self.last_poll.is_some_and(|t| t.elapsed() < POLL) {
+            return;
+        }
+        self.last_poll = Some(Instant::now());
+        self.rebuild_if_old(false);
+        let mtime = state_mtime();
+        if mtime.is_none() || mtime == self.state_mtime {
+            return;
+        }
+        self.state_mtime = mtime;
+        match model::load_state() {
+            Ok(st) => {
+                if let Some(a) = &st.arch {
+                    let view = model::view_all(a);
+                    let same = self.pending.is_none() && self.lay.is_some() && self.view.as_ref().is_some_and(|v| shape(v) == shape(&view));
+                    if same {
+                        self.view = Some(view);
+                        self.forget_missing();
+                    } else if self.zoomed {
+                        self.start_layout(view);
+                    } else {
+                        self.view = Some(view); // 窓の大きさが決まったら並べる
+                    }
+                }
+                self.state = Some(st);
+                if self.msg.starts_with("読めない") {
+                    self.msg.clear();
+                }
+            }
+            Err(e) => self.msg = format!("読めない: {e}"), // 描けなくても閉じない。次の回にやり直す
+        }
+    }
+
+    /// 選んでいた部品・まとめた線が、新しい中身に無ければ選ぶのをやめる
+    fn forget_missing(&mut self) {
+        let (Some(view), Some(lay)) = (&self.view, &self.lay) else { return };
+        if self.selected.as_ref().is_some_and(|id| !view.nodes.iter().any(|n| &n.id == id)) {
+            self.selected = None;
+        }
+        if self.bundle.is_some_and(|b| b >= lay.bundles.len()) {
+            self.bundle = None;
+        }
+    }
+
+    /// 状態が古ければ、裏で組み立て（board.py build）を頼む（カンバンの画面を閉じていても、構成図だけで新しく保つ）。
+    /// カンバンの画面が開いていれば 90 秒ごとに作り直されるので、ここからはほとんど頼まない
+    fn rebuild_if_old(&mut self, force: bool) {
+        if let Some(c) = &mut self.builder {
+            if matches!(c.try_wait(), Ok(None)) {
+                return; // まだ組み立て中（重ねない）
+            }
+        }
+        if self.asked_at.is_some_and(|t| t.elapsed().as_secs() < REBUILD_AT_LEAST) {
+            return;
+        }
+        let age = self.state_mtime.and_then(|m| m.elapsed().ok()).map_or(u64::MAX, |d| d.as_secs());
+        if !force && age < REBUILD_EVERY {
+            return;
+        }
+        self.asked_at = Some(Instant::now());
+        let mut cmd = std::process::Command::new(python());
+        layout::hidden(cmd.arg(board_py()).arg("build").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()));
+        match cmd.spawn() {
+            Ok(c) => {
+                self.builder = Some(c);
+                self.flash = Some(("組み立て直している…".into(), Instant::now()));
+            }
+            Err(e) => self.msg = format!("組み立てを頼めない: {e}"),
+        }
     }
 
     /// 図が出て窓が決めた大きさになってから、毎回の間隔を測る。最初の 10 回は捨てる
@@ -392,6 +491,36 @@ impl Viewer {
         let _ = std::fs::write(&b.out, format!("{{\"avg_ms\": {avg:.2}, \"p95_ms\": {p95:.2}, \"frames\": {}}}", t.len()));
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
+}
+
+fn state_mtime() -> Option<std::time::SystemTime> {
+    std::fs::metadata(model::state_path()).and_then(|m| m.modified()).ok()
+}
+
+/// 並べ方を決めるもの（部品・枠・待ち・線）。これが同じなら並べ直さない
+fn shape(v: &View) -> Vec<String> {
+    let mut out: Vec<String> = v.nodes.iter().map(|n| format!("{}|{}|{}", n.id, n.zone, n.blocked)).collect();
+    out.sort();
+    out.extend(v.edges.iter().map(|e| format!("{}>{}|{}", e.from, e.to, e.label)));
+    out
+}
+
+/// カンバンの組み立て（~/.claude/skills/kanban は personal/kanban へのジャンクション）
+fn board_py() -> std::path::PathBuf {
+    let home = std::env::var_os("USERPROFILE").unwrap_or_default();
+    std::path::PathBuf::from(home).join(".claude").join("skills").join("kanban").join("board.py")
+}
+
+/// python.exe の本物の場所（WindowsApps の起動用の別名は避ける）
+fn python() -> std::path::PathBuf {
+    std::env::var_os("PATH")
+        .and_then(|p| {
+            std::env::split_paths(&p)
+                .filter(|d| !d.to_string_lossy().contains("WindowsApps"))
+                .map(|d| d.join("python.exe"))
+                .find(|c| c.is_file())
+        })
+        .unwrap_or_else(|| "python".into())
 }
 
 /// その場所のいちばん上にあるもの（部品 → 線 → まとめた線の順）。線は 4 画素まで近ければ当たり
