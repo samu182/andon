@@ -112,7 +112,7 @@ impl Side {
     }
 
     /// 部品の詳しい中身。上に要約（なぜ・次の一手・主な PR・AI に渡す文）、その下に畳む材料、最後に外へのリンク
-    pub fn node(&mut self, ui: &mut Ui, st: &State, view: &View, n: &Node) -> Option<Action> {
+    pub fn node(&mut self, ui: &mut Ui, st: &State, view: &View, n: &Node, work: Option<&crate::model::Work>) -> Option<Action> {
         let mut out = None;
         let d = &n.detail;
         let names: HashMap<&str, &str> = view.nodes.iter().map(|x| (x.id.as_str(), x.title.as_str())).collect();
@@ -125,6 +125,9 @@ impl Side {
         let kind = if n.blocked.is_empty() { n.status.as_str() } else { "stop" };
         para(ui, &[("● ", plain(10.0), status_color(kind)), (status_text(kind), plain(10.0), TEXT)]);
         let mut rows: Vec<(&str, String)> = vec![("説明", n.sub.clone())];
+        if let Some(w) = work {
+            rows.push(("作業中", w.branch.clone()));
+        }
         let changes = st.arch.as_ref().map(|a| &a.changes);
         if let Some(c) = changes.and_then(|ch| ch.nodes.get(&n.id)) {
             let old = c.from.as_ref().map_or("新しく宣言", |w| status_text(&w.status));

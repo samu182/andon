@@ -22,6 +22,7 @@ pub struct Pr {
     pub state: String,
     pub why: String,
     pub project: String,
+    pub branch: String,
 }
 
 #[derive(Deserialize, Clone, Default)]
@@ -75,6 +76,8 @@ pub struct Node {
     pub skeleton: bool,
     /// プロジェクトごとの骨格の番号
     pub steps: BTreeMap<String, u32>,
+    /// つながっているカード（"<project>:<カードの id>"）
+    pub plan: Vec<String>,
     pub detail: Detail,
     pub refs: Vec<Ref>,
     pub paths: Vec<String>,
@@ -144,6 +147,24 @@ pub struct Plan {
 pub struct Project {
     pub github: String,
     pub plan: Option<Plan>,
+    /// 番号（文字）ごとの PR
+    pub prs: HashMap<String, Pr>,
+}
+
+/// カンバンのカード（作業中の判定に使うところだけ）
+#[derive(Deserialize, Clone, Default)]
+#[serde(default)]
+pub struct Card {
+    pub project: String,
+    pub id: String,
+    pub prs: Vec<u64>,
+}
+
+/// 作業中の部品: どのブランチで、今選んでいるペインか
+#[derive(Clone, PartialEq, Debug)]
+pub struct Work {
+    pub branch: String,
+    pub focused: bool,
 }
 
 #[derive(Deserialize, Default)]
@@ -152,6 +173,7 @@ pub struct State {
     pub generated_at: String,
     pub arch: Option<Arch>,
     pub projects: HashMap<String, Project>,
+    pub cards: Vec<Card>,
 }
 
 /// 読む state。環境変数 ARCH_STATE で差し替えられる（写しを書き換えて、追いつくかを確かめるため）
@@ -252,6 +274,66 @@ pub fn view_for(a: &Arch, scope: &str, picked: Option<&str>) -> View {
     View { zones: a.zones.clone(), nodes, edges, owner, owners }
 }
 
+/// ブランチ名とカードの id を比べるための形（feat/・fix/ などの前置きと記号を落とす）
+fn norm(name: &str) -> String {
+    let low = name.to_lowercase();
+    let mut rest = low.as_str();
+    for p in ["feat", "fix", "docs", "chore", "refactor", "test"] {
+        if let Some(r) = low.strip_prefix(p).and_then(|r| r.strip_prefix('/').or_else(|| r.strip_prefix('-'))) {
+            rest = r;
+            break;
+        }
+    }
+    rest.chars().filter(|c| c.is_ascii_lowercase() || c.is_ascii_digit()).collect()
+}
+
+/// 今どこを作業しているか（arch.py の working の写し）。
+/// herdr のペインのブランチ → そのブランチの開いている PR → その PR をつないだカード → 部品。
+/// PR がまだ無いブランチは、名前がカードの id と同じなら（fix/tap-button と fix-tap-button）そのカード。
+/// branches: {ブランチ名: 今選んでいるペインか}
+pub fn working(nodes: &[Node], cards: &[Card], projects: &HashMap<String, Project>, branches: &BTreeMap<String, bool>) -> HashMap<String, Work> {
+    let mut card_of_pr: HashMap<(String, u64), String> = HashMap::new();
+    let mut card_by_name: HashMap<String, String> = HashMap::new();
+    for c in cards {
+        let key = format!("{}:{}", c.project, c.id);
+        card_by_name.insert(norm(&c.id), key.clone());
+        for &num in &c.prs {
+            card_of_pr.insert((c.project.clone(), num), key.clone());
+        }
+    }
+    let mut keys: HashMap<String, Work> = HashMap::new();
+    for (branch, &focused) in branches {
+        let mut hit: Vec<String> = vec![];
+        for (proj, p) in projects {
+            for pr in p.prs.values() {
+                if pr.branch == *branch && pr.state == "OPEN" {
+                    if let Some(k) = card_of_pr.get(&(proj.clone(), pr.number)) {
+                        hit.push(k.clone());
+                    }
+                }
+            }
+        }
+        if hit.is_empty() {
+            if let Some(k) = card_by_name.get(&norm(branch)) {
+                hit.push(k.clone());
+            }
+        }
+        for k in hit {
+            let was = keys.get(&k).is_some_and(|w| w.focused);
+            keys.insert(k, Work { branch: branch.clone(), focused: focused || was });
+        }
+    }
+    let mut out = HashMap::new();
+    for n in nodes {
+        for r in &n.plan {
+            if let Some(w) = keys.get(r) {
+                out.insert(n.id.clone(), w.clone());
+            }
+        }
+    }
+    out
+}
+
 /// フォルダの形をそろえる（Windows は大文字小文字・区切りの向きを区別しない）
 fn norm_path(p: &str) -> String {
     p.replace('\\', "/").trim_end_matches('/').to_lowercase()
@@ -330,6 +412,25 @@ mod tests {
 
     fn repos() -> HashMap<String, String> {
         [("shop", "C:/dev/shop"), ("api", "C:/dev/api"), ("none", "")].iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn ブランチから_pr_カード_部品へ_名前でも合わせる() {
+        let node = |id: &str, plan: &[&str]| Node { id: id.into(), plan: plan.iter().map(|s| s.to_string()).collect(), ..Default::default() };
+        let nodes = vec![node("p:mail", &["p:C-8"]), node("p:tap", &["p:fix-tap-button"]), node("p:db", &[])];
+        let cards = vec![
+            Card { project: "p".into(), id: "C-8".into(), prs: vec![71] },
+            Card { project: "p".into(), id: "fix-tap-button".into(), prs: vec![] },
+        ];
+        let pr = Pr { number: 71, state: "OPEN".into(), branch: "feat/ses-delivery".into(), ..Default::default() };
+        let projects: HashMap<String, Project> =
+            [("p".to_string(), Project { prs: [("71".to_string(), pr)].into_iter().collect(), ..Default::default() })].into_iter().collect();
+        let branches: BTreeMap<String, bool> =
+            [("feat/ses-delivery", true), ("fix/tap-button", false), ("main", false)].iter().map(|(k, v)| (k.to_string(), *v)).collect();
+        let got = working(&nodes, &cards, &projects, &branches);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got["p:mail"], Work { branch: "feat/ses-delivery".into(), focused: true });
+        assert_eq!(got["p:tap"], Work { branch: "fix/tap-button".into(), focused: false });
     }
 
     #[test]

@@ -190,3 +190,49 @@ pub fn bring_front() {
 
 #[cfg(not(windows))]
 pub fn bring_front() {}
+
+/// herdr のペイン全部のブランチ: {ブランチ名: 今選んでいるペインか}。main などは数えない。読めなければ空。
+/// cache はフォルダごとの前回のブランチ（15 秒は使い回す）
+pub fn pane_branches(cache: &mut std::collections::HashMap<String, (std::time::Instant, Option<String>)>) -> std::collections::BTreeMap<String, bool> {
+    let mut out = std::collections::BTreeMap::new();
+    for (cwd, focused) in panes() {
+        if cwd.is_empty() {
+            continue;
+        }
+        let fresh = cache.get(&cwd).filter(|c| c.0.elapsed() < Duration::from_secs(15)).map(|c| c.1.clone());
+        let branch = fresh.unwrap_or_else(|| {
+            let b = branch_of(&cwd);
+            cache.insert(cwd.clone(), (std::time::Instant::now(), b.clone()));
+            b
+        });
+        if let Some(b) = branch.filter(|b| !matches!(b.as_str(), "main" | "master" | "HEAD")) {
+            let was = out.get(&b).copied().unwrap_or(false);
+            out.insert(b, was || focused);
+        }
+    }
+    out
+}
+
+/// フォルダの今のブランチ。git でなければ None（git もコンソールのプログラムなので CREATE_NO_WINDOW で）
+fn branch_of(cwd: &str) -> Option<String> {
+    let mut cmd = std::process::Command::new("git");
+    crate::layout::hidden(cmd.args(["-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"]).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()));
+    let out = cmd.output().ok().filter(|o| o.status.success())?;
+    let b = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!b.is_empty()).then_some(b)
+}
+
+/// 5 秒ごとにペインのブランチを調べて tx に送る糸。herdr と git は遅いことがあるので、窓の糸では待たない
+/// （窓の糸で待つと、遅いときに窓が数秒固まった・2026-10-06 のレビュー）
+pub fn watch_branches(tx: mpsc::Sender<std::collections::BTreeMap<String, bool>>, ctx: egui::Context) {
+    std::thread::spawn(move || {
+        let mut cache = std::collections::HashMap::new();
+        loop {
+            if tx.send(pane_branches(&mut cache)).is_err() {
+                break;
+            }
+            ctx.request_repaint();
+            std::thread::sleep(Duration::from_secs(5));
+        }
+    });
+}

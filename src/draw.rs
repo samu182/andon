@@ -1,7 +1,7 @@
 //! 描く。arch_view.py の redraw の写し（見た目の決まりは向こうのコメントが正本）。
 
 use crate::layout::{Layout, NODE_H, NODE_W, Pt, ZONE_HEAD};
-use crate::model::{Changes, View, bones, through};
+use crate::model::{Changes, View, Work, bones, through};
 use egui::{
     Align2, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Painter, Pos2, Rect, Shape, Stroke, StrokeKind, pos2, vec2,
 };
@@ -342,6 +342,8 @@ pub struct Focus<'a> {
     pub hover_edge: Option<usize>,
     /// 骨格（ウォーキングスケルトン）以外を薄くする
     pub bones_only: bool,
+    /// 作業中の部品（herdr のペインのブランチ → PR → カード → 部品）
+    pub working: Option<&'a HashMap<String, Work>>,
 }
 
 /// 部品の四角（画面の座標）
@@ -487,6 +489,11 @@ pub fn diagram(p: &Painter, view: &View, lay: &Layout, changes: &Changes, cam: &
         p.text(pos2(r.max.x - pad, dy), Align2::RIGHT_CENTER, word, sf.clone(), DIM);
         let title = clip(p, &n.title, &tf, w - pad * 2.0 - ww - 6.0 * s);
         p.text(pos2(r.min.x + pad, dy), Align2::LEFT_CENTER, title, tf, TEXT);
+        if let Some(work) = focus.working.and_then(|w| w.get(&n.id)) {
+            // 今どこを作業しているか
+            let text = if work.focused { "作業中（今のペイン）" } else { "作業中" };
+            p.text(pos2(r.min.x + 14.0 * s, r.min.y - 4.0 * s), Align2::LEFT_BOTTOM, text, font(9.0 * s, true), BONE);
+        }
         if two {
             let sub = clip(p, &n.sub, &sf, w - pad * 2.0 - 30.0 * s);
             p.text(pos2(r.min.x + pad, sub_y), Align2::LEFT_CENTER, sub, sf, FAINT);

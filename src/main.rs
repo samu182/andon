@@ -216,13 +216,23 @@ struct Viewer {
     inbox: Option<mpsc::Receiver<win::Msg>>,
     /// 開いてから少し待って前に出す時刻（裏から立てた窓は Windows が前に出さない）
     front_at: Option<Instant>,
+    /// 作業中の部品と、ペインのブランチの受け口（裏の糸が 5 秒ごとに送ってくる）
+    working: std::collections::HashMap<String, model::Work>,
+    branches: std::collections::BTreeMap<String, bool>,
+    branch_rx: Option<mpsc::Receiver<std::collections::BTreeMap<String, bool>>>,
 }
 
 impl Viewer {
     fn new(ctx: egui::Context, scope: String, listener: Option<std::net::TcpListener>) -> Self {
+        let real = listener.is_some(); // テストでは herdr も git も呼ばない
         let inbox = listener.map(|l| {
             let (tx, rx) = mpsc::channel();
             win::listen(l, tx, ctx.clone());
+            rx
+        });
+        let branch_rx = real.then(|| {
+            let (tx, rx) = mpsc::channel();
+            win::watch_branches(tx, ctx.clone());
             rx
         });
         let bench = std::env::var("ARCH_BENCH").ok().map(|out| Bench { out, last: None, times: vec![] });
@@ -258,6 +268,9 @@ impl Viewer {
             cur: 0,
             inbox,
             front_at: Some(Instant::now() + std::time::Duration::from_millis(300)),
+            working: Default::default(),
+            branches: Default::default(),
+            branch_rx,
         };
         match model::load_state() {
             Ok(st) => {
@@ -301,6 +314,13 @@ impl Viewer {
         }
         self.poll();
         ctx.request_repaint_after(POLL); // 何も触っていなくても、state を見に行けるように
+        if let Some(b) = self.branch_rx.as_ref().and_then(|rx| rx.try_iter().last()) {
+            self.branches = b;
+        }
+        self.working = match self.state.as_ref() {
+            Some(st) => model::working(st.arch.as_ref().map_or(&[][..], |a| &a.nodes), &st.cards, &st.projects, &self.branches),
+            None => Default::default(),
+        };
         let msgs: Vec<win::Msg> = self.inbox.as_ref().map(|rx| rx.try_iter().collect()).unwrap_or_default();
         for m in msgs {
             if let win::Msg::Open(scope) = m {
@@ -433,6 +453,7 @@ impl Viewer {
                 hover_node: self.hover_node.as_deref(),
                 hover_edge: self.hover_edge,
                 bones_only: self.bones_only,
+                working: Some(&self.working),
             };
             let none = model::Changes::default();
             let changes = st.arch.as_ref().map_or(&none, |a| &a.changes);
@@ -560,13 +581,13 @@ impl Viewer {
         let inner = rect.shrink(16.0);
         let salt = format!("{:?}{:?}", self.selected, self.bundle); // 選び直したら、欄を上から
         let mut act = None;
-        let (selected, bundle, side) = (&self.selected, self.bundle, &mut self.side);
+        let (selected, bundle, side, working) = (&self.selected, self.bundle, &mut self.side, &self.working);
         ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
             egui::ScrollArea::vertical().id_salt(salt).auto_shrink([false, false]).show(ui, |ui| {
                 ui.set_width(inner.width() - 12.0);
                 act = match (selected, bundle) {
-                    (Some(id), _) => view.nodes.iter().find(|n| &n.id == id).and_then(|n| side.node(ui, st, view, n)),
+                    (Some(id), _) => view.nodes.iter().find(|n| &n.id == id).and_then(|n| side.node(ui, st, view, n, working.get(&n.id))),
                     (None, Some(b)) if b < lay.bundles.len() => side.bundle(ui, view, lay, b),
                     _ => None,
                 };
