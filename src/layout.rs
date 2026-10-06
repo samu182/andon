@@ -263,10 +263,11 @@ enum LaneKey {
 }
 
 /// 枠をまたぐ線を、枠と枠のあいだの通り道だけを通して引く（別の枠の上を通らない）。
-/// 通り道: 枠の左右のすき間（縦）と、全体の上・下のすき間（横）。同じ通り道の線は少しずつずらす（lanes）。
+/// 通り道: 枠の左右のすき間（縦）と、横の通り道 channels（全体の上・段と段のあいだ・全体の下）。
+/// 同じ通り道の線は少しずつずらす（lanes）。
 /// w は端の点から辺までの幅（部品なら部品の半分、枠の辺から出すなら 0）。
 #[allow(clippy::too_many_arguments)]
-fn route_cross(a: Pt, b: Pt, za: usize, zb: usize, rects: &[[f64; 4]], total: Pt, lanes: &mut HashMap<LaneKey, i64>, w: f64) -> Path {
+fn route_cross(a: Pt, b: Pt, za: usize, zb: usize, rects: &[[f64; 4]], channels: &[f64], lanes: &mut HashMap<LaneKey, i64>, w: f64) -> Path {
     let (ra, rb) = (rects[za], rects[zb]);
     let half = ZONE_GAP / 2.0;
     let right = b.0 >= a.0;
@@ -279,21 +280,20 @@ fn route_cross(a: Pt, b: Pt, za: usize, zb: usize, rects: &[[f64; 4]], total: Pt
     };
     let start = (if ex > a.0 { a.0 + w } else { a.0 - w }, a.1);
     let end = (if nx < b.0 { b.0 - w } else { b.0 + w }, b.1);
-    let (top, bottom) = (-half, total.1 + half);
     let mut candidates: Vec<Vec<Pt>> = vec![];
     if ex == nx {
         candidates.push(vec![start, (ex, a.1), (ex, b.1), end]);
     }
     candidates.push(vec![start, (ex, a.1), (ex, b.1), (nx, b.1), end]); // 縦に動いてから、相手の高さで横へ
     candidates.push(vec![start, (ex, a.1), (nx, a.1), (nx, b.1), end]); // 横に動いてから縦へ
-    for y in [top, bottom] {
-        candidates.push(vec![start, (ex, a.1), (ex, y), (nx, y), (nx, b.1), end]); // 全体の上か下を回る
+    for &y in channels {
+        candidates.push(vec![start, (ex, a.1), (ex, y), (nx, y), (nx, b.1), end]); // 横の通り道を回る
     }
     let skip = [za, zb];
     let ok = |path: &Vec<Pt>| (1..path.len() - 2).all(|i| !hits(path[i], path[i + 1], rects, &skip));
     let length = |path: &Vec<Pt>| path.windows(2).map(|s| dist(s[0], s[1])).sum::<f64>();
     let good: Vec<&Vec<Pt>> = candidates.iter().filter(|c| ok(c)).collect();
-    let pool: Vec<&Vec<Pt>> = if good.is_empty() { candidates[candidates.len() - 2..].iter().collect() } else { good };
+    let pool: Vec<&Vec<Pt>> = if good.is_empty() { candidates[candidates.len() - channels.len()..].iter().collect() } else { good };
     let mut best = pool[0];
     for c in &pool[1..] {
         if length(c) < length(best) {
@@ -315,10 +315,13 @@ fn route_cross(a: Pt, b: Pt, za: usize, zb: usize, rects: &[[f64; 4]], total: Pt
     let dex = lane(LaneKey::V(ex.round_ties_even() as i64));
     let dnx = if nx == ex { dex } else { lane(LaneKey::V(nx.round_ties_even() as i64)) };
     let inner = &pts[1..pts.len() - 1];
-    let dtop = if inner.iter().any(|p| p.1 == top) { lane(LaneKey::H(top.to_bits())) } else { 0.0 };
-    let dbottom = if inner.iter().any(|p| p.1 == bottom) { lane(LaneKey::H(bottom.to_bits())) } else { 0.0 };
+    let shifts: Vec<(f64, f64)> = channels
+        .iter()
+        .filter(|&&y| inner.iter().any(|p| p.1 == y))
+        .map(|&y| (y, lane(LaneKey::H(y.to_bits()))))
+        .collect();
     let dx = |x: f64| if x == ex { dex } else if x == nx { dnx } else { 0.0 };
-    let dy = |y: f64| if y == top { dtop } else if y == bottom { dbottom } else { 0.0 };
+    let dy = |y: f64| shifts.iter().find(|s| s.0 == y).map_or(0.0, |s| s.1);
     let n = pts.len();
     let pts: Vec<Pt> = pts
         .iter()
@@ -349,6 +352,36 @@ fn arrange(sizes: &[Pt]) -> (Vec<Pt>, Pt) {
     (spots, (x + col_w, tallest))
 }
 
+/// 枠を段に分けて置く。starts は各段の最初の枠の番号（1 段なら [0]）。段の中は arrange と同じ。
+/// 返すのは各枠の左上・全体の大きさ・横の通り道（全体の上・段と段のあいだ・全体の下）。
+fn arrange_rows(sizes: &[Pt], starts: &[usize]) -> (Vec<Pt>, Pt, Vec<f64>) {
+    let half = ZONE_GAP / 2.0;
+    let (mut spots, mut width, mut y0, mut channels) = (vec![], 0.0f64, 0.0, vec![-half]);
+    for (r, &s) in starts.iter().enumerate() {
+        let e = starts.get(r + 1).copied().unwrap_or(sizes.len());
+        let (row, (w, h)) = arrange(&sizes[s..e]);
+        spots.extend(row.into_iter().map(|(x, y)| (x, y + y0)));
+        width = width.max(w);
+        y0 += h + ZONE_GAP;
+        channels.push(y0 - half);
+    }
+    let total = (width, y0 - ZONE_GAP);
+    *channels.last_mut().unwrap() = total.1 + half;
+    (spots, total, channels)
+}
+
+/// 段の分け方。n 個の枠を、1 段から max_rows 段まで（各段の最初の枠の番号）
+fn row_starts(n: usize, max_rows: usize) -> Vec<Vec<usize>> {
+    let mut out = vec![vec![0]];
+    if max_rows >= 2 {
+        out.extend((1..n).map(|i| vec![0, i]));
+    }
+    if max_rows >= 3 {
+        out.extend((1..n).flat_map(|i| (i + 1..n).map(move |j| vec![0, i, j])));
+    }
+    out
+}
+
 /// 枠を左から並べる順。外部 → 社内の仕組み → プロジェクト → 外部サービス。
 /// プロジェクトどうしは、呼ぶ側を左・呼ばれる側（土台）を右に置く（線が左から右へ流れる）。
 fn zone_order(view: &View) -> Vec<String> {
@@ -366,8 +399,11 @@ fn zone_order(view: &View) -> Vec<String> {
     used.iter().map(|z| z.id.clone()).collect()
 }
 
-/// 全体が窓の形（aspect = 幅 / 高さ）にいちばん近くなるよう、枠の中を横に流すか縦に流すかを選ぶ。
-pub fn layout(view: &View, aspect: f64) -> Result<Layout, String> {
+/// 全体が窓の形（aspect = 幅 / 高さ）にいちばん近くなるよう、枠の中を横に流すか縦に流すかと、
+/// 枠を何段に分けるか（max_rows 段まで）を選ぶ。
+/// 1 段だけだと全体の図が横に細長くなり（68 部品で 6:1）、窓に収めると 28% に縮んで文字が潰れた（2026-10-06）。
+/// max_rows = 1 なら arch_view.py の layout と同じ答えになる（--dump-layout で突き合わせる）。
+pub fn layout(view: &View, aspect: f64, max_rows: usize) -> Result<Layout, String> {
     let names: HashMap<String, String> = view.nodes.iter().enumerate().map(|(i, n)| (n.id.clone(), format!("n{i}"))).collect();
     let zone_of: HashMap<&str, &str> = view.nodes.iter().map(|n| (n.id.as_str(), n.zone.as_str())).collect();
     let zi_of: HashMap<&str, usize> = view.zones.iter().enumerate().map(|(i, z)| (z.id.as_str(), i)).collect();
@@ -401,18 +437,20 @@ pub fn layout(view: &View, aspect: f64) -> Result<Layout, String> {
     })?;
     let bx = |inner: &Inner| (inner.size.0 + ZONE_PAD * 2.0, inner.size.1 + ZONE_HEAD + ZONE_PAD);
     let n = order.len();
-    let mut best: Option<(f64, Vec<usize>, Vec<Pt>, Pt)> = None;
-    for m in 0..(1usize << n) {
-        // itertools.product((0, 1), repeat=n) と同じ順（先頭の枠がいちばん上の桁）
-        let pick: Vec<usize> = (0..n).map(|i| (m >> (n - 1 - i)) & 1).collect();
-        let sizes: Vec<Pt> = pick.iter().enumerate().map(|(i, &p)| bx(&options[i][p])).collect();
-        let (spots, (tw, th)) = arrange(&sizes);
-        let score = ((tw / th) / aspect).ln().abs() + 0.15 * (tw * th).ln(); // 窓の形に近く、なるべく小さく
-        if best.as_ref().is_none_or(|b| score < b.0) {
-            best = Some((score, pick, spots, (tw, th)));
+    let mut best: Option<(f64, Vec<usize>, Vec<Pt>, Pt, Vec<f64>)> = None;
+    for starts in row_starts(n, max_rows) {
+        for m in 0..(1usize << n) {
+            // itertools.product((0, 1), repeat=n) と同じ順（先頭の枠がいちばん上の桁）
+            let pick: Vec<usize> = (0..n).map(|i| (m >> (n - 1 - i)) & 1).collect();
+            let sizes: Vec<Pt> = pick.iter().enumerate().map(|(i, &p)| bx(&options[i][p])).collect();
+            let (spots, (tw, th), channels) = arrange_rows(&sizes, &starts);
+            let score = ((tw / th) / aspect).ln().abs() + 0.15 * (tw * th).ln(); // 窓の形に近く、なるべく小さく
+            if best.as_ref().is_none_or(|b| score < b.0) {
+                best = Some((score, pick, spots, (tw, th), channels));
+            }
         }
     }
-    let (_, pick, spots, total) = best.ok_or("並べる枠が無い")?;
+    let (_, pick, spots, total, channels) = best.ok_or("並べる枠が無い")?;
     let mut pos = HashMap::new();
     let mut frames: Vec<Frame> = vec![];
     let mut paths: Vec<Option<Path>> = vec![None; view.edges.len()];
@@ -446,15 +484,15 @@ pub fn layout(view: &View, aspect: f64) -> Result<Layout, String> {
     for (i, e) in view.edges.iter().enumerate() {
         if paths[i].is_none() {
             let (za, zb) = (zone_rect[zone_of[e.from.as_str()]], zone_rect[zone_of[e.to.as_str()]]);
-            paths[i] = Some(route_cross(pos[&e.from], pos[&e.to], za, zb, &rects, total, &mut lanes, NODE_W * 72.0 / 2.0));
+            paths[i] = Some(route_cross(pos[&e.from], pos[&e.to], za, zb, &rects, &channels, &mut lanes, NODE_W * 72.0 / 2.0));
         }
     }
-    let bundles = bundles(view, &pos, &zone_of, &zone_rect, &rects, total);
+    let bundles = bundles(view, &pos, &zone_of, &zone_rect, &rects, &channels);
     Ok(Layout { pos, frames, paths: paths.into_iter().map(|p| p.unwrap()).collect(), size: total, bundles })
 }
 
 /// 枠をまたぐ線を、枠の組ごとに 1 本にまとめる。端は枠の、相手に向いた辺（高さは関わる部品の平均）。
-fn bundles(view: &View, pos: &HashMap<String, Pt>, zone_of: &HashMap<&str, &str>, zone_rect: &HashMap<&str, usize>, rects: &[[f64; 4]], total: Pt) -> Vec<Bundle> {
+fn bundles(view: &View, pos: &HashMap<String, Pt>, zone_of: &HashMap<&str, &str>, zone_rect: &HashMap<&str, usize>, rects: &[[f64; 4]], channels: &[f64]) -> Vec<Bundle> {
     let mut groups: Vec<((String, String), Vec<usize>)> = vec![];
     for (i, e) in view.edges.iter().enumerate() {
         let (za, zb) = (zone_of[e.from.as_str()], zone_of[e.to.as_str()]);
@@ -517,7 +555,7 @@ fn bundles(view: &View, pos: &HashMap<String, Pt>, zone_of: &HashMap<&str, &str>
         .iter()
         .zip(ends)
         .map(|(((za, zb), idx), [a, b])| {
-            let path = route_cross(a, b, zone_rect[za.as_str()], zone_rect[zb.as_str()], rects, total, &mut lanes, 0.0);
+            let path = route_cross(a, b, zone_rect[za.as_str()], zone_rect[zb.as_str()], rects, channels, &mut lanes, 0.0);
             let kind = idx
                 .iter()
                 .map(|&i| if view.edges[i].blocked.is_empty() { view.edges[i].status.as_str() } else { "stop" })

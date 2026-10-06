@@ -255,11 +255,17 @@ pub struct Camera {
 }
 
 impl Camera {
-    /// 窓に全体を収める（拡大は 1.4 倍まで）
+    /// 窓に全体を収める（拡大は 1.4 倍まで）。枠の外を回る線（全体の上・下・右のすき間）も含めて収める
     pub fn fit(area: Rect, lay: &Layout) -> Self {
-        let (sw, sh) = (lay.size.0 as f32, lay.size.1 as f32);
+        let (mut x0, mut y0, mut x1, mut y1) = (0.0f64, 0.0f64, lay.size.0, lay.size.1);
+        let lines = lay.paths.iter().map(|p| &p.points).chain(lay.bundles.iter().map(|b| &b.points));
+        for q in lines.flatten() {
+            (x0, y0, x1, y1) = (x0.min(q.0), y0.min(q.1), x1.max(q.0), y1.max(q.1));
+        }
+        let (x0, y0) = (x0 as f32 - 10.0, y0 as f32 - 10.0); // 矢じりと名札のぶん
+        let (sw, sh) = (x1 as f32 + 10.0 - x0, y1 as f32 + 10.0 - y0);
         let scale = ((area.width() - 24.0) / sw).min((area.height() - 24.0) / sh).min(1.4);
-        let origin = area.min + vec2((area.width() - sw * scale) / 2.0, (area.height() - sh * scale) / 2.0);
+        let origin = area.min + vec2((area.width() - sw * scale) / 2.0 - x0 * scale, (area.height() - sh * scale) / 2.0 - y0 * scale);
         Camera { scale, origin }
     }
 
@@ -420,7 +426,7 @@ pub fn diagram(p: &Painter, view: &View, lay: &Layout, changes: &serde_json::Val
             // 骨格の番号。切れ目なく本番の所までは塗り、その先は輪だけ
             let done = step <= sk.through;
             let rad = 9.0 * s;
-            p.circle(r.min, rad, if done { BONE } else { CARD }, Stroke::new(1.0, BONE));
+            p.circle(r.min, rad, if done { BONE } else { CARD }, Stroke::new(1.0_f32, BONE));
             p.text(r.min, Align2::CENTER_CENTER, step.to_string(), num_font(8.5 * s), if done { WHITE } else { BONE });
         }
     }
@@ -430,7 +436,7 @@ pub fn diagram(p: &Painter, view: &View, lay: &Layout, changes: &serde_json::Val
         let text = clip(p, reason, &f, r.width() - 34.0 * s);
         let tw = measure(p, &text, &f);
         let b = Rect::from_min_size(r.min + vec2(6.0 * s, 3.0 * s), vec2(tw + 22.0 * s, 18.0 * s));
-        p.rect(b, 0.0, PANEL, Stroke::new(1.0, LINE), StrokeKind::Middle);
+        p.rect(b, 0.0, PANEL, Stroke::new(1.0_f32, LINE), StrokeKind::Middle);
         p.circle_filled(b.min + vec2(9.0 * s, 9.0 * s), 3.0 * s, status_color("stop"));
         p.text(b.min + vec2(16.0 * s, 9.0 * s), Align2::LEFT_CENTER, text, f, DIM);
     }
@@ -443,7 +449,7 @@ pub fn diagram(p: &Painter, view: &View, lay: &Layout, changes: &serde_json::Val
 pub fn header(p: &Painter, area: Rect, title: &str, meta: &str) {
     let r = Rect::from_min_size(area.min, vec2(area.width(), HEAD_H));
     p.rect_filled(r, 0.0, PANEL);
-    p.line_segment([pos2(r.min.x, r.max.y), pos2(r.max.x, r.max.y)], Stroke::new(1.0, LINE));
+    p.line_segment([pos2(r.min.x, r.max.y), pos2(r.max.x, r.max.y)], Stroke::new(1.0_f32, LINE));
     p.text(pos2(r.min.x + 14.0, r.center().y), Align2::LEFT_CENTER, title, font(12.0, true), TEXT);
     p.text(pos2(r.max.x - 14.0, r.center().y), Align2::RIGHT_CENTER, meta, font(9.0, false), DIM);
 }
