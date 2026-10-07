@@ -70,6 +70,16 @@ pub fn status_color(kind: &str) -> Color32 {
     }
 }
 
+/// 部品の地の色（状態はこれだけで示す）
+fn tint(kind: &str) -> Color32 {
+    match kind {
+        "wip" => TINT_WIP,
+        "stop" => TINT_STOP,
+        "none" => TINT_NONE,
+        _ => CARD,
+    }
+}
+
 fn status_short(kind: &str) -> &'static str {
     match kind {
         "live" => "本番",
@@ -503,22 +513,11 @@ pub fn diagram(p: &Painter, view: &View, lay: &Layout, changes: &Changes, projec
             p.text(pos2(r.max.x, r.min.y - g - 3.0 * s), Align2::RIGHT_BOTTOM, "次はここ", font(9.0 * s, true), BONE);
         }
         rounded(p, r.translate(vec2(0.0, 1.0)), R_NODE * s, Some(SHADOW), None, &[]); // 1px だけ下にずらした影
-        let fill = match kind {
-            "wip" => TINT_WIP,
-            "stop" => TINT_STOP,
-            "none" => TINT_NONE,
-            _ => CARD,
-        };
         let outline = if sel { (2.0, BONE) } else { (1.0, CARD_LINE) };
-        rounded(p, r, R_NODE * s, Some(fill), Some(outline), if kind == "none" && !sel { &[4.0, 3.0] } else { &[] });
-        // 本番は丸だけ（多数派なので文字を出すと題を削る）。1 行しか入らないときも丸だけ（色の地と丸で分かる）
-        let word = if kind == "live" || !two { "" } else { status_short(kind) };
-        let ww = if word.is_empty() { (10.0 * s).max(8.0) } else { measure(p, word, &sf) + 12.0 * s };
-        let rad = (3.5 * s).max(2.5);
+        rounded(p, r, R_NODE * s, Some(tint(kind)), Some(outline), if kind == "none" && !sel { &[4.0, 3.0] } else { &[] });
+        // 状態は地の色だけで示す（前は丸と文字も付けていて、同じことを 3 回言っていた・2026-10-07）。意味は上の凡例
         let dy = title_y;
-        p.circle_filled(pos2(r.max.x - pad - ww + rad, dy), rad, status_color(kind));
-        p.text(pos2(r.max.x - pad, dy), Align2::RIGHT_CENTER, word, sf.clone(), DIM);
-        let title = clip(p, &n.title, &tf, w - pad * 2.0 - ww - 6.0 * s);
+        let title = clip(p, &n.title, &tf, w - pad * 2.0);
         p.text(pos2(r.min.x + pad, dy), Align2::LEFT_CENTER, title, tf, TEXT);
         if let Some(work) = focus.working.and_then(|w| w.get(&n.id)) {
             // 今どこを作業しているか: 文字は足さず、外側を青（進行中の色）の点線で囲む。「次はここ」の紺の実線の輪より外に置き、
@@ -572,13 +571,15 @@ pub fn header(p: &Painter, area: Rect, meta: &str, drift: usize, changes: usize)
     p.rect_filled(r, 0.0, PANEL);
     p.line_segment([pos2(r.min.x, r.max.y), pos2(r.max.x, r.max.y)], Stroke::new(1.0_f32, LINE));
     // 範囲の名前はタブにあるので、ここには出さない
-    // 凡例: 線の種類 4 つ（形で分ける）と、状態の丸 4 つを 1 行で
+    // 凡例: 線の種類 4 つ（形で分ける）と、部品の地の色 4 つを 1 行で
     let (f, y) = (font(9.0, false), r.center().y);
     let mut x = r.min.x + 14.0;
     for k in ["live", "wip", "none", "stop"] {
         polyline(p, vec![pos2(x, y), pos2(x + 24.0, y)], 1.0, EDGE, dash(k), "", (0.0, 0.0, 0.0));
         x += 30.0;
-        p.circle_filled(pos2(x, y), 3.5, status_color(k));
+        let chip = Rect::from_center_size(pos2(x + 4.0, y), vec2(16.0, 11.0));
+        rounded(p, chip, 3.0, Some(tint(k)), Some((1.0, CARD_LINE)), if k == "none" { &[3.0, 2.0] } else { &[] });
+        x += 8.0;
         x = p.text(pos2(x + 8.0, y), Align2::LEFT_CENTER, status_short(k), f.clone(), DIM).max.x + 18.0;
     }
     let m = p.text(pos2(r.max.x - 14.0, y), Align2::RIGHT_CENTER, meta, f, DIM);
