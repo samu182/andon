@@ -28,3 +28,8 @@ opt-level = 2
 
 [build-dependencies]
 embed-resource = "3.0.12"
+
+# CPU で描く部品を、直したものに差し替える（vendor/egui_software_backend/src/winit.rs の「andon の直し」）。
+# 元の 0.0.3 は request_repaint_after の時刻を待たずに描き直すので、窓を開いているだけで CPU のコア 1 つを使い切った（2026-10-07）
+[patch.crates-io]
+egui_software_backend = { path = "vendor/egui_software_backend" }
