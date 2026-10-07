@@ -99,6 +99,16 @@ fn now() -> String {
 /// ~/.herdr/panes.json を読むだけで、herdr も git も起動しない（前は 5 秒ごとにペインの数だけ起動していた・2026-10-07）。
 /// 60 秒より古ければ herdr が動いていないとみて空。ブランチは git でなければ空
 pub fn panes() -> Vec<(String, String, bool)> {
+    rows("panes")
+}
+
+/// worktree（<本体>-wt-<名前>）: (フォルダ, ブランチ, false)。Claude は本体のペインから cd して worktree で作業するので、
+/// ペインのフォルダだけでは作業中のブランチが分からない。worktree があること＝作業中とみる（tick が同じファイルに書く）
+pub fn worktrees() -> Vec<(String, String, bool)> {
+    rows("worktrees")
+}
+
+fn rows(key: &str) -> Vec<(String, String, bool)> {
     let home = std::env::var_os("USERPROFILE").unwrap_or_default();
     let path = std::path::PathBuf::from(home).join(".herdr").join("panes.json");
     let Ok(text) = std::fs::read_to_string(path) else { return vec![] };
@@ -107,7 +117,7 @@ pub fn panes() -> Vec<(String, String, bool)> {
     if now.saturating_sub(v["at"].as_u64().unwrap_or(0)) > 60 {
         return vec![];
     }
-    v["panes"]
+    v[key]
         .as_array()
         .map(|ps| {
             ps.iter()
@@ -199,10 +209,10 @@ pub fn bring_front() {
 #[cfg(not(windows))]
 pub fn bring_front() {}
 
-/// herdr のペイン全部のブランチ: {ブランチ名: 今選んでいるペインか}。main など・ブランチの無いもの・切り離し（@ で始まる）は数えない
+/// herdr のペイン全部と worktree のブランチ: {ブランチ名: 今選んでいるペインか}。main など・ブランチの無いもの・切り離し（@ で始まる）は数えない
 pub fn pane_branches() -> std::collections::BTreeMap<String, bool> {
     let mut out = std::collections::BTreeMap::new();
-    for (_, b, focused) in panes() {
+    for (_, b, focused) in panes().into_iter().chain(worktrees()) {
         if b.is_empty() || b.starts_with('@') || matches!(b.as_str(), "main" | "master" | "HEAD") {
             continue;
         }
