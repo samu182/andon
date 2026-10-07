@@ -499,7 +499,6 @@ impl Viewer {
             }
             _ => self.msg.clone(),
         };
-        let title = if self.scope.is_empty() { "全体".to_string() } else { format!("{} とつながる部品", self.scope) };
         let (n_drift, n_change) = match (&self.state, &self.view) {
             (Some(st), Some(v)) => {
                 let ids: std::collections::HashSet<&str> = v.nodes.iter().map(|n| n.id.as_str()).collect();
@@ -508,7 +507,7 @@ impl Viewer {
             }
             _ => (0, 0),
         };
-        let head = draw::header(&p, area, &title, "押すと詳しく　f 全体　s 骨格だけ　← → 骨格をたどる　r 更新", &meta, n_drift, n_change);
+        let head = draw::header(&p, area, &meta, n_drift, n_change);
         let head_resp = ui.interact(egui::Rect::from_min_size(area.min, egui::vec2(area.width(), draw::HEAD_H)), egui::Id::new("header"), egui::Sense::click());
         let over = head_resp.hover_pos().and_then(|at| head.iter().find(|h| h.0.contains(at)).map(|h| h.1));
         if over.is_some() {

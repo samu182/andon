@@ -565,25 +565,24 @@ pub enum HeadHit {
 }
 
 /// 上の帯（題・凡例・ずれと変化の数・操作の案内・何時の state か）。返すのは押せる所
-pub fn header(p: &Painter, area: Rect, title: &str, hint: &str, meta: &str, drift: usize, changes: usize) -> Vec<(Rect, HeadHit)> {
+pub fn header(p: &Painter, area: Rect, meta: &str, drift: usize, changes: usize) -> Vec<(Rect, HeadHit)> {
     let r = Rect::from_min_size(area.min, vec2(area.width(), HEAD_H));
     p.rect_filled(r, 0.0, PANEL);
     p.line_segment([pos2(r.min.x, r.max.y), pos2(r.max.x, r.max.y)], Stroke::new(1.0_f32, LINE));
-    let t = p.text(pos2(r.min.x + 14.0, r.center().y), Align2::LEFT_CENTER, title, font(12.0, true), TEXT);
+    // 範囲の名前はタブにあるので、ここには出さない
     // 凡例: 線の種類 4 つ（形で分ける）と、状態の丸 4 つを 1 行で
     let (f, y) = (font(9.0, false), r.center().y);
-    let mut x = t.max.x + 28.0;
+    let mut x = r.min.x + 14.0;
     for k in ["live", "wip", "none", "stop"] {
         polyline(p, vec![pos2(x, y), pos2(x + 24.0, y)], 1.0, EDGE, dash(k), "", (0.0, 0.0, 0.0));
         x += 30.0;
         p.circle_filled(pos2(x, y), 3.5, status_color(k));
         x = p.text(pos2(x + 8.0, y), Align2::LEFT_CENTER, status_short(k), f.clone(), DIM).max.x + 18.0;
     }
-    let m = p.text(pos2(r.max.x - 14.0, y), Align2::RIGHT_CENTER, meta, f.clone(), DIM);
-    let h = p.text(pos2(m.min.x - 24.0, y), Align2::RIGHT_CENTER, hint, f, FAINT);
+    let m = p.text(pos2(r.max.x - 14.0, y), Align2::RIGHT_CENTER, meta, f, DIM);
     // 図と現物のずれ・前回からの変化。あるときだけ紺の文字で出し、押すと右に一覧
     let mut hits = vec![];
-    let mut right = h.min.x - 24.0;
+    let mut right = m.min.x - 24.0;
     for (n, text, hit) in [(drift, format!("図と現物のずれ {drift}"), HeadHit::Drift), (changes, format!("前回から {changes} 件"), HeadHit::Changes)] {
         if n > 0 {
             let b = p.text(pos2(right, y), Align2::RIGHT_CENTER, text, font(9.0, true), BONE);
@@ -634,6 +633,10 @@ pub fn strip(p: &Painter, r: Rect, view: &View, selected: Option<&str>) -> Vec<(
         let done = b.step.unwrap() <= sk.through;
         let chip = Rect::from_min_max(pos2(x, r.min.y + 18.0), pos2(x + cw, r.min.y + 46.0));
         pill(p, chip, if sel { BONE } else { PANEL }, if sel { BONE } else { LINE });
+        if sk.next.as_deref() == Some(b.id.as_str()) && !sel {
+            // 次に通す部品: 文字は足さず、札を紺の太い縁で目立たせる
+            p.rect_stroke(chip, chip.height() / 2.0, Stroke::new(2.0_f32, BONE), StrokeKind::Inside);
+        }
         let c = pos2(x + 15.0, r.min.y + 32.0);
         let (fill, ring) = match (sel, done) {
             (true, true) => (WHITE, WHITE),
@@ -646,10 +649,6 @@ pub fn strip(p: &Painter, r: Rect, view: &View, selected: Option<&str>) -> Vec<(
         p.text(c, Align2::CENTER_CENTER, b.step.unwrap().to_string(), num_font(8.0), num);
         let ink = if sel { WHITE } else if done { TEXT } else { FAINT };
         p.text(pos2(x + 29.0, c.y), Align2::LEFT_CENTER, clip(p, &b.title, &f, cw - 36.0), f.clone(), ink);
-        if sk.next.as_deref() == Some(b.id.as_str()) {
-            // 次に通す部品
-            p.text(pos2(x + cw / 2.0, r.min.y + 9.0), Align2::CENTER_CENTER, "次はここ", font(8.0, true), BONE);
-        }
         if i + 1 < bones.len() {
             p.text(pos2(x + cw + 6.0, c.y), Align2::CENTER_CENTER, "›", font(10.0, false), FAINT);
         }
