@@ -47,6 +47,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "andon"
+version = "0.1.0"
+dependencies = [
+ "eframe",
+ "egui",
+ "egui-winit",
+ "egui_software_backend",
+ "embed-resource",
+ "memmap2",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "android-activity"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -89,20 +103,6 @@ dependencies = [
  "percent-encoding",
  "windows-sys 0.60.2",
  "x11rb",
-]
-
-[[package]]
-name = "arch-view"
-version = "0.1.0"
-dependencies = [
- "eframe",
- "egui",
- "egui-winit",
- "egui_software_backend",
- "embed-resource",
- "memmap2",
- "serde",
- "serde_json",
 ]
 
 [[package]]

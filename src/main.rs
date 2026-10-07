@@ -1,10 +1,10 @@
-//! 構成図の窓（Rust 版）。中身は board.py が書く ~/.herdr/kanban-state.json の "arch"（判断は arch.py）。ここは読んで描くだけ。
+//! あんどん（構成図の窓・Rust 版）。中身は board.py が書く ~/.herdr/kanban-state.json の "arch"（判断は arch.py）。ここは読んで描くだけ。
 //!
-//!   arch-view                         窓を開く（範囲は herdr で今選んでいるペインのプロジェクト。リポジトリでなければ全体）
-//!   arch-view <project>|all           その範囲のタブで開く
+//!   andon                         窓を開く（範囲は herdr で今選んでいるペインのプロジェクト。リポジトリでなければ全体）
+//!   andon <project>|all           その範囲のタブで開く
 //! すでに開いていれば、開いている窓に「その範囲（渡された範囲か、今選んでいるペインのプロジェクト）のタブを足して前に出て」と
 //! 知らせて終わる（窓は増やさない）。
-//!   arch-view --dump-layout <out> [aspect] [段の上限]   並べた結果を JSON で書く（段の上限 1 なら Python の layout と同じ答え）
+//!   andon --dump-layout <out> [aspect] [段の上限]   並べた結果を JSON で書く（段の上限 1 なら Python の layout と同じ答え）
 //!
 //! 環境変数 ARCH_BENCH=<書き出す先> を付けると、図を 1 画素ずつ動かしながら 180 回描き直し、
 //! 1 回あたりの時間を書き出して閉じる（CPU で描く版と GPU で描く版を比べるため）。
@@ -87,7 +87,7 @@ fn run(scope: String, listener: std::net::TcpListener) {
     // （描き直し 1 回 25.5 ms → 切ると 20.0 ms・2026-10-06 に測った）
     let settings = SoftwareBackendAppConfiguration::new()
         .inner_size(Some(egui::vec2(960.0, 600.0)))
-        .title(Some("構成図".into()))
+        .title(Some("あんどん".into()))
         .icon(Some(std::sync::Arc::new(icon())))
         .caching(false);
     egui_software_backend::run_app_with_software_backend(settings, |ctx: egui::Context| {
@@ -107,11 +107,11 @@ fn run(scope: String, listener: std::net::TcpListener) {
         }
     }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([960.0, 600.0]).with_title("構成図").with_icon(icon()),
+        viewport: egui::ViewportBuilder::default().with_inner_size([960.0, 600.0]).with_title("あんどん").with_icon(icon()),
         ..Default::default()
     };
     eframe::run_native(
-        "構成図",
+        "あんどん",
         options,
         Box::new(|cc| {
             draw::setup_fonts(&cc.egui_ctx);
@@ -499,7 +499,7 @@ impl Viewer {
             }
             _ => self.msg.clone(),
         };
-        let title = if self.scope.is_empty() { "構成図 — 全体".to_string() } else { format!("構成図 — {} とつながる部品", self.scope) };
+        let title = if self.scope.is_empty() { "あんどん — 全体".to_string() } else { format!("あんどん — {} とつながる部品", self.scope) };
         let (n_drift, n_change) = match (&self.state, &self.view) {
             (Some(st), Some(v)) => {
                 let ids: std::collections::HashSet<&str> = v.nodes.iter().map(|n| n.id.as_str()).collect();
@@ -940,7 +940,7 @@ mod tests {
 
     /// 骨格が 3 つ（1・2 は本番、3 は作りかけ）の state を読ませた Viewer
     fn flow_viewer() -> Viewer {
-        let dir = std::env::temp_dir().join("arch-view-test");
+        let dir = std::env::temp_dir().join("andon-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("state.json");
         let node = |id: &str, step: u32, status: &str| {
