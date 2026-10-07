@@ -36,6 +36,8 @@ const MAX_ROWS: usize = 3;
 const POLL: std::time::Duration = std::time::Duration::from_secs(2);
 /// 組み立て（board.py build）を頼む決まりは、カンバンの画面と同じ: 90 秒（＋余裕 10 秒）より古ければ、20 秒に 1 回まで、重ねない
 const REBUILD_EVERY: u64 = 100;
+/// 状態がこれより古ければ、上の帯の右に「何時時点」を出す（秒）
+const STALE_AFTER: u64 = 300;
 const REBUILD_AT_LEAST: u64 = 20;
 const BENCH_FRAMES: usize = 180;
 
@@ -494,8 +496,10 @@ impl Viewer {
                 ctx.request_repaint_after(std::time::Duration::from_millis(500));
                 m.clone()
             }
-            (_, Some(st), Some(v)) if self.msg.is_empty() => {
-                format!("{} 時点・{} 部品", st.generated_at.get(11..16).unwrap_or(""), v.nodes.len())
+            (_, Some(st), Some(_)) if self.msg.is_empty() => {
+                // 時刻は、組み立て直しが追いついていない（古い）ときだけ出す
+                let age = self.state_mtime.and_then(|m| m.elapsed().ok()).map_or(0, |d| d.as_secs());
+                if age > STALE_AFTER { format!("{} 時点", st.generated_at.get(11..16).unwrap_or("")) } else { String::new() }
             }
             _ => self.msg.clone(),
         };

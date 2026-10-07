@@ -608,26 +608,25 @@ pub fn strip(p: &Painter, r: Rect, view: &View, selected: Option<&str>) -> Vec<(
     let mut hits = vec![];
     let bones = bones(&view.nodes);
     if bones.is_empty() {
-        p.text(pos2(r.min.x + 16.0, r.min.y + 32.0), Align2::LEFT_CENTER,
-               "この範囲にはウォーキングスケルトンが無い（計画書の ◆ の項目か、宣言の step で決まる）", font(9.0, false), FAINT);
+        p.text(pos2(r.min.x + 16.0, r.min.y + 32.0), Align2::LEFT_CENTER, "骨格なし", font(9.0, false), FAINT);
         return hits;
     }
     let sk = through(&view.nodes); // 個数ではなく、端から切れ目なく本番の所まで
     let many = view.owners.len() > 1;
     let owner = view.owner.as_deref().unwrap_or("");
-    let o = p.text(pos2(r.min.x + 16.0, r.min.y + 22.0), Align2::LEFT_CENTER, format!("{owner} の骨格{}", if many { " ›" } else { "" }),
-                   font(9.0, true), if many { BONE } else { FAINT });
-    if many {
+    // どこまで本番かは番号の丸の塗りで分かるので、数では書かない。骨格の持ち主は、切り替えられるとき（全体で 2 つ以上）だけ出す
+    let x0 = if many {
+        let o = p.text(pos2(r.min.x + 16.0, r.min.y + 32.0), Align2::LEFT_CENTER, format!("{owner} ›"), font(9.0, true), BONE);
         hits.push((o.expand(4.0), StripHit::Owner));
-    }
-    let value = if sk.next.is_none() { "全部本番".to_string() } else { format!("{} 番まで本番", sk.through) };
-    let head = p.text(pos2(r.min.x + 16.0, r.min.y + 41.0), Align2::LEFT_CENTER, format!("{value} / 全 {}", bones.len()), font(10.0, true), TEXT);
-    let x0 = head.max.x.max(r.min.x + 150.0) + 24.0;
+        o.max.x + 20.0
+    } else {
+        r.min.x + 16.0
+    };
     let f = font(9.0, false);
     let n = bones.len() as f32;
     let each = (r.max.x - 16.0 - x0 - 12.0 * (n - 1.0)) / n; // 1 つあたりに使える幅
     let mut x = x0;
-    for (i, b) in bones.iter().enumerate() {
+    for b in &bones {
         let cw = (measure(p, &b.title, &f) + 42.0).min(each).max(36.0);
         let sel = selected == Some(b.id.as_str());
         let done = b.step.unwrap() <= sk.through;
@@ -649,9 +648,6 @@ pub fn strip(p: &Painter, r: Rect, view: &View, selected: Option<&str>) -> Vec<(
         p.text(c, Align2::CENTER_CENTER, b.step.unwrap().to_string(), num_font(8.0), num);
         let ink = if sel { WHITE } else if done { TEXT } else { FAINT };
         p.text(pos2(x + 29.0, c.y), Align2::LEFT_CENTER, clip(p, &b.title, &f, cw - 36.0), f.clone(), ink);
-        if i + 1 < bones.len() {
-            p.text(pos2(x + cw + 6.0, c.y), Align2::CENTER_CENTER, "›", font(10.0, false), FAINT);
-        }
         hits.push((chip, StripHit::Node(b.id.clone())));
         x += cw + 12.0;
     }
