@@ -121,7 +121,7 @@ fn run(scope: String, listener: std::net::TcpListener) {
     .expect("窓を作れない");
 }
 
-/// 窓の題の帯とタスクバーのアイコン（四角 3 つを線でつなぐ。assets/make_icon.py が作る 64×64 の RGBA）
+/// 窓の題の帯とタスクバーのアイコン（あんどん。assets/make_icon.py が作る 64×64 の RGBA）
 fn icon() -> egui::IconData {
     egui::IconData { rgba: include_bytes!("../assets/icon-64.rgba").to_vec(), width: 64, height: 64 }
 }
