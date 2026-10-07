@@ -173,6 +173,8 @@ pub struct Plan {
 #[serde(default)]
 pub struct Project {
     pub github: String,
+    /// 画面でのプロジェクトの色（kanban.json の "color"。カンバンの画面と同じ色の名前）
+    pub color: Option<String>,
     pub plan: Option<Plan>,
     /// 番号（文字）ごとの PR
     pub prs: HashMap<String, Pr>,

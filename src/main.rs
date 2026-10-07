@@ -482,7 +482,7 @@ impl Viewer {
             };
             let none = model::Changes::default();
             let changes = st.arch.as_ref().map_or(&none, |a| &a.changes);
-            draw::diagram(&p.with_clip_rect(body), view, lay, changes, &shown, &focus);
+            draw::diagram(&p.with_clip_rect(body), view, lay, changes, &st.projects, &shown, &focus);
         }
         self.strip(ui, &p, strip);
         self.tabbar(ui, &p, tabbar);
@@ -499,7 +499,7 @@ impl Viewer {
             }
             _ => self.msg.clone(),
         };
-        let title = if self.scope.is_empty() { "あんどん — 全体".to_string() } else { format!("あんどん — {} とつながる部品", self.scope) };
+        let title = if self.scope.is_empty() { "全体".to_string() } else { format!("{} とつながる部品", self.scope) };
         let (n_drift, n_change) = match (&self.state, &self.view) {
             (Some(st), Some(v)) => {
                 let ids: std::collections::HashSet<&str> = v.nodes.iter().map(|n| n.id.as_str()).collect();

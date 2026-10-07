@@ -1,7 +1,7 @@
 //! 描く。arch_view.py の redraw の写し（見た目の決まりは向こうのコメントが正本）。
 
 use crate::layout::{Layout, NODE_H, NODE_W, Pt, ZONE_HEAD};
-use crate::model::{Changes, View, Work, bones, through};
+use crate::model::{Changes, Project, View, Work, bones, through};
 use egui::{
     Align2, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Painter, Pos2, Rect, Shape, Stroke, StrokeKind, pos2, vec2,
 };
@@ -29,6 +29,27 @@ const WHITE: Color32 = hex(0xffffff);
 pub const ERROR: Color32 = hex(0xcf222e); // 赤はエラーだけ（待ちはエラーではない）
 const KIND_MARK: Color32 = hex(0xe2e5e9); // 外部・社内の仕組み・外部サービスは無彩色の淡い灰色
 const PROJECT_MARKS: [Color32; 2] = [hex(0xdce6f4), hex(0xe7dcf4)]; // 青と紫（明るさ・鮮やかさは同じで、色相だけ変える）
+
+/// プロジェクトの枠の淡い色。kanban.json の "color"（カンバンの画面と同じ色の名前）の系統で決める。無ければ None（青と紫を順に）
+fn project_mark(color: &str) -> Option<Color32> {
+    let c = color.to_ascii_lowercase();
+    // 赤系はエラーの赤と取り違えないよう、少し桃に寄せる
+    let table = [
+        ("red", 0xf6dde2),
+        ("pink", 0xf6dde2),
+        ("orange", 0xf6e3d5),
+        ("yellow", 0xf3eed8),
+        ("gold", 0xf3eed8),
+        ("green", 0xdcefe2),
+        ("cyan", 0xd9eef0),
+        ("aqua", 0xd9eef0),
+        ("turquoise", 0xd9eef0),
+        ("purple", 0xe7dcf4),
+        ("magenta", 0xe7dcf4),
+        ("blue", 0xdce6f4),
+    ];
+    table.iter().find(|(k, _)| c.contains(k)).map(|(_, v)| hex(*v))
+}
 const R_NODE: f32 = 6.0;
 const R_ZONE: f32 = 10.0;
 const DOT_STEP: f32 = 22.0;
@@ -367,14 +388,21 @@ pub fn distance_to(pts: &[Pos2], at: Pos2) -> f32 {
         .fold(f32::INFINITY, f32::min)
 }
 
-pub fn diagram(p: &Painter, view: &View, lay: &Layout, changes: &Changes, cam: &Camera, focus: &Focus) {
+pub fn diagram(p: &Painter, view: &View, lay: &Layout, changes: &Changes, projects: &HashMap<String, Project>, cam: &Camera, focus: &Focus) {
     let s = cam.scale;
     let fnode = focus.hover_node.or(focus.selected);
     let mut marks = PROJECT_MARKS.iter().cycle();
     let zone_mark: HashMap<&str, Color32> = view
         .zones
         .iter()
-        .map(|z| (z.id.as_str(), if matches!(z.kind.as_str(), "external" | "company" | "cloud") { KIND_MARK } else { *marks.next().unwrap() }))
+        .map(|z| {
+            let mark = if matches!(z.kind.as_str(), "external" | "company" | "cloud") {
+                KIND_MARK
+            } else {
+                projects.get(&z.project).and_then(|pr| project_mark(pr.color.as_deref()?)).unwrap_or_else(|| *marks.next().unwrap())
+            };
+            (z.id.as_str(), mark)
+        })
         .collect();
     // 同じ理由で止まっている部品を囲んだ枠の、理由
     let mut reasons: HashMap<String, &str> = HashMap::new();
@@ -663,6 +691,5 @@ pub fn tabbar(p: &Painter, r: Rect, scopes: &[String], cur: usize) -> Vec<(Rect,
         }
         x += w + 4.0;
     }
-    p.text(pos2(x + 10.0, r.center().y + 3.0), Align2::LEFT_CENTER, "ほかのプロジェクトで prefix+o を押すと、タブが増える", f, FAINT);
     hits
 }
