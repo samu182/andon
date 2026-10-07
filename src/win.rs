@@ -95,18 +95,26 @@ fn now() -> String {
     String::new()
 }
 
-/// herdr のペイン: (フォルダ, 今選んでいるか)。herdr が無い・読めなければ空。
-/// herdr はコンソールのプログラムなので、CREATE_NO_WINDOW で呼ばないと窓が開いて入力を奪う
-pub fn panes() -> Vec<(String, bool)> {
-    let mut cmd = std::process::Command::new("herdr");
-    crate::layout::hidden(cmd.args(["pane", "list"]).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()));
-    let Ok(out) = cmd.output() else { return vec![] };
-    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else { return vec![] };
-    v["result"]["panes"]
+/// herdr のペイン: (フォルダ, ブランチ, 今選んでいるか)。herdr のタブバーの tick（~/.herdr/herdr-tick.ps1）が 8 秒ごとに書く
+/// ~/.herdr/panes.json を読むだけで、herdr も git も起動しない（前は 5 秒ごとにペインの数だけ起動していた・2026-10-07）。
+/// 60 秒より古ければ herdr が動いていないとみて空。ブランチは git でなければ空
+pub fn panes() -> Vec<(String, String, bool)> {
+    let home = std::env::var_os("USERPROFILE").unwrap_or_default();
+    let path = std::path::PathBuf::from(home).join(".herdr").join("panes.json");
+    let Ok(text) = std::fs::read_to_string(path) else { return vec![] };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(text.trim_start_matches('\u{feff}')) else { return vec![] };
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    if now.saturating_sub(v["at"].as_u64().unwrap_or(0)) > 60 {
+        return vec![];
+    }
+    v["panes"]
         .as_array()
         .map(|ps| {
             ps.iter()
-                .map(|p| (p["cwd"].as_str().unwrap_or("").to_string(), p["focused"].as_bool().unwrap_or(false)))
+                .map(|p| {
+                    let s = |k: &str| p[k].as_str().unwrap_or("").to_string();
+                    (s("cwd"), s("branch"), p["focused"].as_bool().unwrap_or(false))
+                })
                 .collect()
         })
         .unwrap_or_default()
@@ -114,7 +122,7 @@ pub fn panes() -> Vec<(String, bool)> {
 
 /// herdr で今選んでいるペインのフォルダ
 pub fn focused_cwd() -> Option<String> {
-    panes().into_iter().find(|p| p.1).map(|p| p.0)
+    panes().into_iter().find(|p| p.2).map(|p| p.0)
 }
 
 #[cfg(windows)]
@@ -191,47 +199,32 @@ pub fn bring_front() {
 #[cfg(not(windows))]
 pub fn bring_front() {}
 
-/// herdr のペイン全部のブランチ: {ブランチ名: 今選んでいるペインか}。main などは数えない。読めなければ空。
-/// cache はフォルダごとの前回のブランチ（15 秒は使い回す）
-pub fn pane_branches(cache: &mut std::collections::HashMap<String, (std::time::Instant, Option<String>)>) -> std::collections::BTreeMap<String, bool> {
+/// herdr のペイン全部のブランチ: {ブランチ名: 今選んでいるペインか}。main など・ブランチの無いもの・切り離し（@ で始まる）は数えない
+pub fn pane_branches() -> std::collections::BTreeMap<String, bool> {
     let mut out = std::collections::BTreeMap::new();
-    for (cwd, focused) in panes() {
-        if cwd.is_empty() {
+    for (_, b, focused) in panes() {
+        if b.is_empty() || b.starts_with('@') || matches!(b.as_str(), "main" | "master" | "HEAD") {
             continue;
         }
-        let fresh = cache.get(&cwd).filter(|c| c.0.elapsed() < Duration::from_secs(15)).map(|c| c.1.clone());
-        let branch = fresh.unwrap_or_else(|| {
-            let b = branch_of(&cwd);
-            cache.insert(cwd.clone(), (std::time::Instant::now(), b.clone()));
-            b
-        });
-        if let Some(b) = branch.filter(|b| !matches!(b.as_str(), "main" | "master" | "HEAD")) {
-            let was = out.get(&b).copied().unwrap_or(false);
-            out.insert(b, was || focused);
-        }
+        let was = out.get(&b).copied().unwrap_or(false);
+        out.insert(b, was || focused);
     }
     out
 }
 
-/// フォルダの今のブランチ。git でなければ None（git もコンソールのプログラムなので CREATE_NO_WINDOW で）
-fn branch_of(cwd: &str) -> Option<String> {
-    let mut cmd = std::process::Command::new("git");
-    crate::layout::hidden(cmd.args(["-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"]).stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()));
-    let out = cmd.output().ok().filter(|o| o.status.success())?;
-    let b = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (!b.is_empty()).then_some(b)
-}
-
-/// 5 秒ごとにペインのブランチを調べて tx に送る糸。herdr と git は遅いことがあるので、窓の糸では待たない
-/// （窓の糸で待つと、遅いときに窓が数秒固まった・2026-10-06 のレビュー）
+/// 5 秒ごとにペインのブランチを読んで、変わったときだけ tx に送る糸（ファイルを読むだけだが、窓の糸の外に置いたまま）
 pub fn watch_branches(tx: mpsc::Sender<std::collections::BTreeMap<String, bool>>, ctx: egui::Context) {
     std::thread::spawn(move || {
-        let mut cache = std::collections::HashMap::new();
+        let mut last = None;
         loop {
-            if tx.send(pane_branches(&mut cache)).is_err() {
-                break;
+            let now = pane_branches();
+            if last.as_ref() != Some(&now) {
+                if tx.send(now.clone()).is_err() {
+                    break;
+                }
+                ctx.request_repaint();
+                last = Some(now);
             }
-            ctx.request_repaint();
             std::thread::sleep(Duration::from_secs(5));
         }
     });
