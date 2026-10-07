@@ -521,9 +521,11 @@ pub fn diagram(p: &Painter, view: &View, lay: &Layout, changes: &Changes, projec
         let title = clip(p, &n.title, &tf, w - pad * 2.0 - ww - 6.0 * s);
         p.text(pos2(r.min.x + pad, dy), Align2::LEFT_CENTER, title, tf, TEXT);
         if let Some(work) = focus.working.and_then(|w| w.get(&n.id)) {
-            // 今どこを作業しているか
-            let text = if work.focused { "作業中（今のペイン）" } else { "作業中" };
-            p.text(pos2(r.min.x + 14.0 * s, r.min.y - 4.0 * s), Align2::LEFT_BOTTOM, text, font(9.0 * s, true), BONE);
+            // 今どこを作業しているか: 文字は足さず、外側を青（進行中の色）の点線で囲む。「次はここ」の紺の実線の輪より外に置き、
+            // 「まだ無い」の灰色の点線の縁（四角そのもの）とも、色と位置で分ける。今のペインの作業なら太く
+            let g = 9.0 * s;
+            let wide = if work.focused { 2.5 } else { 1.5 };
+            rounded(p, r.expand(g), (R_NODE + 6.0) * s, None, Some((wide, status_color("wip"))), &[5.0 * s, 4.0 * s]);
         }
         if two {
             let sub = clip(p, &n.sub, &sf, w - pad * 2.0 - 30.0 * s);
