@@ -149,6 +149,15 @@ pub struct Drift {
     /// 見張っている場所にあるのに、どの部品の paths にも無いもの（宣言漏れ）
     pub unclaimed: Vec<String>,
     pub missing: Vec<Missing>,
+    /// 計画書の項目のうち、どの部品・線の plan にも無いもの（図に描かれていない作業）
+    pub unplanned: Vec<Unplanned>,
+}
+
+#[derive(Deserialize, Clone, Default)]
+#[serde(default)]
+pub struct Unplanned {
+    pub id: String,
+    pub title: String,
 }
 
 #[derive(Deserialize, Clone, Default)]
