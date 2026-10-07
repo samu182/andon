@@ -40,6 +40,8 @@ const REBUILD_EVERY: u64 = 100;
 const STALE_AFTER: u64 = 300;
 const REBUILD_AT_LEAST: u64 = 20;
 const BENCH_FRAMES: usize = 180;
+/// 作業中のライトが灯る・消えるを入れ替える間隔（ミリ秒）
+const BLINK: u64 = 800;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -475,12 +477,21 @@ impl Viewer {
             if let Some(b) = &self.bench {
                 shown.origin.x += b.times.len() as f32; // 引きずって動かしているのと同じ描き直し
             }
+            // 作業中のライトの点滅。描き直しは BLINK に 1 回だけで、作業中の部品が図に無いときと窓を最小化しているときは頼まない
+            // （CPU で描くので 1 回 12 ms ほどかかる。0.8 秒ごとなら CPU のコア 1 つの 2% ほど）
+            let blinking = view.nodes.iter().any(|n| self.working.contains_key(&n.id))
+                && !ctx.input(|i| i.viewport().minimized.unwrap_or(false));
+            let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+            if blinking {
+                ctx.request_repaint_after(std::time::Duration::from_millis(BLINK - ms % BLINK));
+            }
             let focus = draw::Focus {
                 selected: self.selected.as_deref(),
                 hover_node: self.hover_node.as_deref(),
                 hover_edge: self.hover_edge,
                 bones_only: self.bones_only,
                 working: Some(&self.working),
+                lit: !blinking || (ms / BLINK) % 2 == 0,
             };
             let none = model::Changes::default();
             let changes = st.arch.as_ref().map_or(&none, |a| &a.changes);

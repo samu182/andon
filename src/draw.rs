@@ -378,6 +378,8 @@ pub struct Focus<'a> {
     pub bones_only: bool,
     /// 作業中の部品（herdr のペインのブランチ → PR → カード → 部品）
     pub working: Option<&'a HashMap<String, Work>>,
+    /// 作業中のライトが今灯っているか（BLINK ごとに入れ替わる）
+    pub lit: bool,
 }
 
 /// 部品の四角（画面の座標）
@@ -520,11 +522,18 @@ pub fn diagram(p: &Painter, view: &View, lay: &Layout, changes: &Changes, projec
         let title = clip(p, &n.title, &tf, w - pad * 2.0);
         p.text(pos2(r.min.x + pad, dy), Align2::LEFT_CENTER, title, tf, TEXT);
         if let Some(work) = focus.working.and_then(|w| w.get(&n.id)) {
-            // 今どこを作業しているか: 文字は足さず、外側を青（進行中の色）の点線で囲む。「次はここ」の紺の実線の輪より外に置き、
-            // 「まだ無い」の灰色の点線の縁（四角そのもの）とも、色と位置で分ける。今のペインの作業なら太く
-            let g = 9.0 * s;
-            let wide = if work.focused { 2.5 } else { 1.5 };
-            rounded(p, r.expand(g), (R_NODE + 6.0) * s, None, Some((wide, status_color("wip"))), &[5.0 * s, 4.0 * s]);
+            // 今どこを作業しているか: 右上の角に青（進行中の色）のライト。灯る・消えるをゆっくり繰り返す（あんどんの灯り）。
+            // 消えているあいだも輪は残して、どこにあるかは分かるようにする。今のペインの作業なら少し大きく
+            let c = pos2(r.max.x, r.min.y);
+            let rad = if work.focused { 5.5 } else { 4.5 } * s;
+            let blue = status_color("wip");
+            if focus.lit {
+                p.circle_filled(c, rad * 2.2, blue.gamma_multiply(0.18)); // にじむ光
+                p.circle_filled(c, rad, blue);
+            } else {
+                p.circle_filled(c, rad, WHITE);
+            }
+            p.circle_stroke(c, rad, Stroke::new(1.5_f32, blue));
         }
         if two {
             let sub = clip(p, &n.sub, &sf, w - pad * 2.0 - 30.0 * s);
