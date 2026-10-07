@@ -187,6 +187,8 @@ pub struct Card {
     pub project: String,
     pub id: String,
     pub prs: Vec<u64>,
+    /// PR がまだ無いあいだ、このカードの作業をしているブランチ（plan カードの id はブランチ名とそろわないため）
+    pub branches: Vec<String>,
 }
 
 /// 作業中の部品: どのブランチで、今選んでいるペインか
@@ -318,7 +320,8 @@ fn norm(name: &str) -> String {
 
 /// 今どこを作業しているか（arch.py の working の写し）。
 /// herdr のペインのブランチ → そのブランチの開いている PR → その PR をつないだカード → 部品。
-/// PR がまだ無いブランチは、名前がカードの id と同じなら（fix/tap-button と fix-tap-button）そのカード。
+/// PR がまだ無いブランチは、カードの branches に書いてあればそのカード、無ければ名前がカードの id と同じなら
+/// （fix/tap-button と fix-tap-button）そのカード。
 /// branches: {ブランチ名: 今選んでいるペインか}
 pub fn working(nodes: &[Node], cards: &[Card], projects: &HashMap<String, Project>, branches: &BTreeMap<String, bool>) -> HashMap<String, Work> {
     let mut card_of_pr: HashMap<(String, u64), String> = HashMap::new();
@@ -326,6 +329,9 @@ pub fn working(nodes: &[Node], cards: &[Card], projects: &HashMap<String, Projec
     for c in cards {
         let key = format!("{}:{}", c.project, c.id);
         card_by_name.insert(norm(&c.id), key.clone());
+        for b in &c.branches {
+            card_by_name.insert(norm(b), key.clone());
+        }
         for &num in &c.prs {
             card_of_pr.insert((c.project.clone(), num), key.clone());
         }
@@ -448,8 +454,8 @@ mod tests {
         let node = |id: &str, plan: &[&str]| Node { id: id.into(), plan: plan.iter().map(|s| s.to_string()).collect(), ..Default::default() };
         let nodes = vec![node("p:mail", &["p:C-8"]), node("p:tap", &["p:fix-tap-button"]), node("p:db", &[])];
         let cards = vec![
-            Card { project: "p".into(), id: "C-8".into(), prs: vec![71] },
-            Card { project: "p".into(), id: "fix-tap-button".into(), prs: vec![] },
+            Card { project: "p".into(), id: "C-8".into(), prs: vec![71], ..Default::default() },
+            Card { project: "p".into(), id: "fix-tap-button".into(), ..Default::default() },
         ];
         let pr = Pr { number: 71, state: "OPEN".into(), branch: "feat/ses-delivery".into(), ..Default::default() };
         let projects: HashMap<String, Project> =
@@ -460,6 +466,15 @@ mod tests {
         assert_eq!(got.len(), 2);
         assert_eq!(got["p:mail"], Work { branch: "feat/ses-delivery".into(), focused: true });
         assert_eq!(got["p:tap"], Work { branch: "fix/tap-button".into(), focused: false });
+    }
+
+    #[test]
+    fn pr_の無いブランチはカードに書いたもので合わせる() {
+        let nodes = vec![Node { id: "p:monthly".into(), plan: vec!["p:C-15".into()], ..Default::default() }];
+        let cards = vec![Card { project: "p".into(), id: "C-15".into(), branches: vec!["feat/monthly-report".into()], ..Default::default() }];
+        let branches: BTreeMap<String, bool> = [("feat/monthly-report".to_string(), false)].into_iter().collect();
+        let got = working(&nodes, &cards, &HashMap::new(), &branches);
+        assert_eq!(got["p:monthly"], Work { branch: "feat/monthly-report".into(), focused: false });
     }
 
     #[test]
