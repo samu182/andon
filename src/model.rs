@@ -151,6 +151,18 @@ pub struct Drift {
     pub missing: Vec<Missing>,
     /// 計画書の項目のうち、どの部品・線の plan にも無いもの（図に描かれていない作業）
     pub unplanned: Vec<Unplanned>,
+    /// 部品の docs の設計書が、宣言（arch.json）の保存より後に変わったもの（設計が変わった）
+    pub stale_docs: Vec<StaleDoc>,
+}
+
+#[derive(Deserialize, Clone, Default)]
+#[serde(default)]
+pub struct StaleDoc {
+    pub doc: String,
+    pub nodes: Vec<String>,
+    pub hash: String,
+    pub subject: String,
+    pub date: String,
 }
 
 #[derive(Deserialize, Clone, Default)]

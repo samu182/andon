@@ -358,7 +358,8 @@ pub fn list(ui: &mut Ui, title: &str, lines: &[Line]) -> Option<Action> {
 pub fn drift_lines(st: &State, view: &View) -> Vec<Line> {
     let mut lines = vec![Line::Text(
         "見張っている場所にあるのに、どの部品の paths にも無いもの（宣言漏れ）と、paths に書いたのに origin/main に無いもの。\
-         部品の paths に足すか、宣言の ignore に足すと消える。\n         計画書の項目でどの部品にも当たっていないもの（図に無い計画）は、部品の plan に足すか、宣言の plan_ignore に足すと消える。"
+         部品の paths に足すか、宣言の ignore に足すと消える。\n         計画書の項目でどの部品にも当たっていないもの（図に無い計画）は、部品の plan に足すか、宣言の plan_ignore に足すと消える。
+         部品の docs の設計書が宣言より後に変わったもの（設計が変わった）は、宣言を見直して直すか、直す所が無ければ arch.json を保存し直すと消える。"
             .into(),
         9.0,
         FAINT,
@@ -367,7 +368,7 @@ pub fn drift_lines(st: &State, view: &View) -> Vec<Line> {
     let projects: std::collections::BTreeSet<&str> = view.nodes.iter().map(|n| n.project.as_str()).collect();
     for p in projects {
         let Some(d) = a.drift.get(p) else { continue };
-        if d.unclaimed.is_empty() && d.missing.is_empty() && d.unplanned.is_empty() {
+        if d.unclaimed.is_empty() && d.missing.is_empty() && d.unplanned.is_empty() && d.stale_docs.is_empty() {
             continue;
         }
         let gh = st.projects.get(p).map(|x| x.github.clone()).unwrap_or_default();
@@ -383,6 +384,13 @@ pub fn drift_lines(st: &State, view: &View) -> Vec<Line> {
         for u in &d.unplanned {
             lines.push(Line::Text(format!("図に無い計画: {} {}", u.id, u.title), 10.0, TEXT));
         }
+        for s in &d.stale_docs {
+            let nodes: Vec<&str> = s.nodes.iter().map(|n| n.split_once(':').map_or(n.as_str(), |x| x.1)).collect();
+            lines.push(Line::Link(
+                format!("設計が変わった: {}（{}）{} {}", s.doc, nodes.join("・"), s.date, s.subject),
+                gh_url(&gh, &format!("commit/{}", s.hash)),
+            ));
+        }
     }
     lines
 }
@@ -391,7 +399,7 @@ pub fn drift_lines(st: &State, view: &View) -> Vec<Line> {
 pub fn drift_count(st: &State, view: &View) -> usize {
     let Some(a) = &st.arch else { return 0 };
     let projects: std::collections::BTreeSet<&str> = view.nodes.iter().map(|n| n.project.as_str()).collect();
-    projects.iter().filter_map(|p| a.drift.get(*p)).map(|d| d.unclaimed.len() + d.missing.len() + d.unplanned.len()).sum()
+    projects.iter().filter_map(|p| a.drift.get(*p)).map(|d| d.unclaimed.len() + d.missing.len() + d.unplanned.len() + d.stale_docs.len()).sum()
 }
 
 /// 前回（その日の最初の写し）からの変化
