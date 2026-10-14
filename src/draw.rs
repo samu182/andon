@@ -572,6 +572,8 @@ pub fn diagram(p: &Painter, view: &View, lay: &Layout, changes: &Changes, projec
 pub enum HeadHit {
     Drift,
     Changes,
+    /// 今のタブを、ブラウザで操作できる HTML に書き出す
+    Export,
 }
 
 /// 上の帯（題・凡例・ずれと変化の数・操作の案内・何時の state か）。返すのは押せる所
@@ -591,10 +593,12 @@ pub fn header(p: &Painter, area: Rect, meta: &str, drift: usize, changes: usize)
         x += 8.0;
         x = p.text(pos2(x + 8.0, y), Align2::LEFT_CENTER, status_short(k), f.clone(), DIM).max.x + 18.0;
     }
-    let m = p.text(pos2(r.max.x - 14.0, y), Align2::RIGHT_CENTER, meta, f, DIM);
+    let m = p.text(pos2(r.max.x - 14.0, y), Align2::RIGHT_CENTER, meta, f.clone(), DIM);
+    // 書き出す（いつでも押せるが、目立たせない。見どころは 1 か所に絞る）
+    let ex = p.text(pos2(m.min.x - if meta.is_empty() { 0.0 } else { 24.0 }, y), Align2::RIGHT_CENTER, "書き出す", f, DIM);
     // 図と現物のずれ・前回からの変化。あるときだけ紺の文字で出し、押すと右に一覧
-    let mut hits = vec![];
-    let mut right = m.min.x - 24.0;
+    let mut hits = vec![(ex.expand(4.0), HeadHit::Export)];
+    let mut right = ex.min.x - 24.0;
     for (n, text, hit) in [(drift, format!("図と現物のずれ {drift}"), HeadHit::Drift), (changes, format!("前回から {changes} 件"), HeadHit::Changes)] {
         if n > 0 {
             let b = p.text(pos2(right, y), Align2::RIGHT_CENTER, text, font(9.0, true), BONE);

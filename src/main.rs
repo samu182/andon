@@ -5,6 +5,8 @@
 //! すでに開いていれば、開いている窓に「その範囲（渡された範囲か、今選んでいるペインのプロジェクト）のタブを足して前に出て」と
 //! 知らせて終わる（窓は増やさない）。
 //!   andon --dump-layout <out> [aspect] [段の上限]   並べた結果を JSON で書く（段の上限 1 なら Python の layout と同じ答え）
+//!   andon --export [<project>|all] [書き出す先]      その範囲を、ブラウザで操作できる HTML に書き出す（既定は全体・
+//!                                                    ~/.herdr/andon-export/）。窓の中では上の帯の「書き出す」か e キー
 //!
 //! 環境変数 ARCH_BENCH=<書き出す先> を付けると、図を 1 画素ずつ動かしながら 180 回描き直し、
 //! 1 回あたりの時間を書き出して閉じる（CPU で描く版と GPU で描く版を比べるため）。
@@ -14,6 +16,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod draw;
+mod export;
 mod layout;
 mod model;
 mod side;
@@ -57,6 +60,32 @@ fn main() {
             Err(e) => serde_json::json!({ "error": e }).to_string(),
         };
         std::fs::write(out, body).expect("書き出せない");
+        return;
+    }
+    if args.get(1).map(String::as_str) == Some("--export") {
+        let scope = match args.get(2).map(String::as_str) {
+            None | Some("all") => String::new(),
+            Some(p) => p.to_string(),
+        };
+        let r = model::load_state().and_then(|st| {
+            let a = st.arch.as_ref().ok_or("arch が無い")?;
+            let view = model::view_for(a, &scope, None);
+            if !scope.is_empty() && view.nodes.is_empty() {
+                return Err(format!("{scope} の部品が無い"));
+            }
+            let lay = layout::layout(&view, 1.6, MAX_ROWS)?;
+            let path = args.get(3).map(std::path::PathBuf::from).unwrap_or_else(|| export::default_path(&st, &scope));
+            export::write(&path, &st, &view, &lay, &scope, &Default::default())?;
+            Ok(path)
+        });
+        // release では窓のプログラム（windows_subsystem）なので、コンソールには出ない。結果はファイルがあるかで見る
+        match r {
+            Ok(p) => println!("{}", p.display()),
+            Err(e) => {
+                eprintln!("書き出せない: {e}");
+                std::process::exit(1);
+            }
+        }
         return;
     }
     let fixed = args.get(1).filter(|a| !a.starts_with("--")).cloned();
@@ -392,9 +421,12 @@ impl Viewer {
         draw::paper(&p, body);
         let keys = ui.input(|i| {
             use egui::Key;
-            [Key::F, Key::Escape, Key::R, Key::S, Key::ArrowRight, Key::ArrowLeft, Key::Space].map(|k| i.key_pressed(k))
+            [Key::F, Key::Escape, Key::R, Key::S, Key::ArrowRight, Key::ArrowLeft, Key::Space, Key::E].map(|k| i.key_pressed(k))
         });
-        let [f_key, esc, r_key, s_key, right, left, space] = keys;
+        let [f_key, esc, r_key, s_key, right, left, space, e_key] = keys;
+        if e_key {
+            self.export(); // e: 今のタブを、ブラウザで操作できる HTML に書き出して開く
+        }
         if s_key {
             self.bones_only = !self.bones_only; // s: 骨格（ウォーキングスケルトン）以外を薄くする
         }
@@ -528,10 +560,29 @@ impl Viewer {
         if over.is_some() {
             ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
         }
-        if let (true, Some(hit)) = (head_resp.clicked(), over) {
-            (self.list, self.selected, self.bundle) = (Some(hit), None, None);
+        match (head_resp.clicked(), over) {
+            (true, Some(draw::HeadHit::Export)) => self.export(),
+            (true, Some(hit)) => (self.list, self.selected, self.bundle) = (Some(hit), None, None),
+            _ => {}
         }
         self.bench_tick(&ctx, body);
+    }
+
+    /// 今のタブ（窓で見ている中身と並べ方そのまま）を HTML に書き出し、既定のブラウザで開く
+    fn export(&mut self) {
+        let (Some(view), Some(lay), Some(st)) = (&self.view, &self.lay, &self.state) else {
+            self.flash = Some(("まだ並べている（並べ終わってから書き出す）".into(), Instant::now()));
+            return;
+        };
+        let path = export::default_path(st, &self.scope);
+        let msg = match export::write(&path, st, view, lay, &self.scope, &self.working) {
+            Ok(()) => {
+                self.ctx.open_url(egui::OpenUrl::new_tab(export::file_url(&path)));
+                format!("書き出した: {}", path.display())
+            }
+            Err(e) => format!("書き出せない: {e}"),
+        };
+        self.flash = Some((msg, Instant::now()));
     }
 
     /// 下の帯を描き、押されたら: 名前 → 出す骨格を次のプロジェクトへ / 部品 → その部品を選んで図の真ん中へ

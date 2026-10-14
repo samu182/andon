@@ -1,10 +1,10 @@
 //! board.py が書く ~/.herdr/kanban-state.json の "arch" を読む。判断は Python（arch.py）側で済んでいて、ここは読むだけ。
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
-#[derive(Deserialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[serde(default)]
 pub struct Zone {
     pub id: String,
@@ -14,7 +14,7 @@ pub struct Zone {
     pub project: String,
 }
 
-#[derive(Deserialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[serde(default)]
 pub struct Pr {
     pub number: u64,
@@ -25,14 +25,14 @@ pub struct Pr {
     pub branch: String,
 }
 
-#[derive(Deserialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[serde(default)]
 pub struct Item {
     pub text: String,
     pub done: bool,
 }
 
-#[derive(Deserialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[serde(default)]
 pub struct Note {
     #[serde(rename = "ref")]
@@ -41,7 +41,7 @@ pub struct Note {
 }
 
 /// 部品の詳しい中身（arch.py の detail が決める。ここは並べるだけ）
-#[derive(Deserialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[serde(default)]
 pub struct Detail {
     pub reason: String,
@@ -55,14 +55,14 @@ pub struct Detail {
 }
 
 /// 計画書の項目（"<project>:<番号>"）
-#[derive(Deserialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[serde(default)]
 pub struct Ref {
     pub id: String,
     pub critical: bool,
 }
 
-#[derive(Deserialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[serde(default)]
 pub struct Node {
     pub id: String,
@@ -89,7 +89,7 @@ pub struct Node {
     pub step: Option<u32>,
 }
 
-#[derive(Deserialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[serde(default)]
 pub struct Edge {
     pub from: String,
@@ -103,7 +103,7 @@ pub struct Edge {
     pub note: String,
 }
 
-#[derive(Deserialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[serde(default)]
 pub struct Was {
     pub status: String,
@@ -111,7 +111,7 @@ pub struct Was {
 }
 
 /// 前回（その日の最初の写し）からの変化
-#[derive(Deserialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[serde(default)]
 pub struct Change {
     pub from: Option<Was>,
@@ -119,14 +119,14 @@ pub struct Change {
 }
 
 /// 骨格の、端から切れ目なく本番の所の変化
-#[derive(Deserialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[serde(default)]
 pub struct SkeletonChange {
     pub from: Option<u32>,
     pub to: u32,
 }
 
-#[derive(Deserialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[serde(default)]
 pub struct Changes {
     pub since: String,
@@ -135,7 +135,7 @@ pub struct Changes {
 }
 
 /// paths に書いたのに origin/main に無いもの
-#[derive(Deserialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[serde(default)]
 pub struct Missing {
     pub path: String,
@@ -143,7 +143,7 @@ pub struct Missing {
 }
 
 /// 図と現物のずれ（プロジェクトごと）
-#[derive(Deserialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[serde(default)]
 pub struct Drift {
     /// 見張っている場所にあるのに、どの部品の paths にも無いもの（宣言漏れ）
@@ -155,7 +155,7 @@ pub struct Drift {
     pub stale_docs: Vec<StaleDoc>,
 }
 
-#[derive(Deserialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[serde(default)]
 pub struct StaleDoc {
     pub doc: String,
@@ -165,14 +165,14 @@ pub struct StaleDoc {
     pub date: String,
 }
 
-#[derive(Deserialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[serde(default)]
 pub struct Unplanned {
     pub id: String,
     pub title: String,
 }
 
-#[derive(Deserialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[serde(default)]
 pub struct Arch {
     pub zones: Vec<Zone>,
@@ -184,13 +184,13 @@ pub struct Arch {
     pub repos: HashMap<String, String>,
 }
 
-#[derive(Deserialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[serde(default)]
 pub struct Plan {
     pub path: String,
 }
 
-#[derive(Deserialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[serde(default)]
 pub struct Project {
     pub github: String,
@@ -202,7 +202,7 @@ pub struct Project {
 }
 
 /// カンバンのカード（作業中の判定に使うところだけ）
-#[derive(Deserialize, Clone, Default)]
+#[derive(Deserialize, Serialize, Clone, Default)]
 #[serde(default)]
 pub struct Card {
     pub project: String,
