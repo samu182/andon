@@ -274,7 +274,8 @@ pub fn view_all(a: &Arch, picked: Option<&str>) -> View {
     view_for(a, "", picked)
 }
 
-/// 表示する部品の id（arch.py の scope の写し）。scope が空なら全部。あれば、そのプロジェクトの部品と、線 1 本でつながる部品
+/// 表示する部品の id（arch.py の scope の写し）。scope が空なら全部。あれば、そのプロジェクトの部品と、線 1 本でつながる部品。
+/// ほかのプロジェクトの部品でも、そのプロジェクトの骨格に番号を持つものは入れる（骨格の番号が抜けて見えないように）
 pub fn scope_ids(a: &Arch, scope: &str) -> std::collections::HashSet<String> {
     let ids: std::collections::HashSet<String> = a.nodes.iter().map(|n| n.id.clone()).collect();
     if scope.is_empty() {
@@ -290,6 +291,7 @@ pub fn scope_ids(a: &Arch, scope: &str) -> std::collections::HashSet<String> {
             out.insert(e.from.clone());
         }
     }
+    out.extend(a.nodes.iter().filter(|n| n.steps.contains_key(scope)).map(|n| n.id.clone()));
     out
 }
 
@@ -523,5 +525,22 @@ mod tests {
         got.sort();
         assert_eq!(got, ["api:admin", "api:stock", "shop:cart", "shop:mail"]);
         assert_eq!(scope_ids(&a, "").len(), 6);
+    }
+
+    #[test]
+    fn 範囲にはそのプロジェクトの骨格の部品も入る() {
+        let bone = |id: &str, project: &str, owner: &str| Node {
+            id: id.into(),
+            project: project.into(),
+            steps: [(owner.to_string(), 1)].into_iter().collect(),
+            ..Default::default()
+        };
+        let a = Arch {
+            nodes: vec![Node { id: "api:stock".into(), project: "api".into(), ..Default::default() }, bone("x:relay", "x", "api"), bone("x:other", "x", "x")],
+            ..Default::default()
+        };
+        let mut got: Vec<String> = scope_ids(&a, "api").into_iter().collect();
+        got.sort();
+        assert_eq!(got, ["api:stock", "x:relay"]);
     }
 }
