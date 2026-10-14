@@ -385,7 +385,7 @@ function header() {
   });
   document.getElementById("legend").innerHTML = leg.join("");
   const at = D.generated_at || "";
-  document.getElementById("meta").textContent = `${at.slice(5, 10).replace("-", "/")} ${at.slice(11, 16)} 時点の写し`;
+  document.getElementById("meta").textContent = `${at.slice(5, 10).replace("-", "/")} ${at.slice(11, 16)} 時点の写し${D.share ? "（共有用）" : ""}`;
   const nd = driftCount(), nc = D.changes ? Object.keys(D.changes.nodes).length : 0;
   const dr = document.getElementById("drift"), ch = document.getElementById("changes");
   dr.hidden = !nd; dr.textContent = `図と現物のずれ ${nd}`;
@@ -438,7 +438,7 @@ function nodeSide(n) {
     h += pr ? `<div>${linkOr(`#${pr.number} ${pr.title}`, ghUrl(gh(pr.project), `pull/${pr.number}`))}</div><div class="faint">　${esc(pr.why || (pr.state || "").toLowerCase())}</div>`
             : `<div class="faint">まだ無い（PR を出すと、題の計画書の番号かカードの prs でつながる）</div>`;
   }
-  h += `<div class="copy"><button class="btn" id="copy">AI に渡す文をコピー</button><span class="faint">${esc((D.generated_at || "").slice(11, 16))} 時点</span></div>`;
+  h += `<div class="copy">${D.share ? "" : `<button class="btn" id="copy">AI に渡す文をコピー</button>`}<span class="faint">${esc((D.generated_at || "").slice(11, 16))} 時点</span></div>`;
   if (planned) {
     const items = d.items || [];
     h += details("やること", items.length ? `（${d.progress}）` : "", !!n.blocked,
@@ -451,7 +451,7 @@ function nodeSide(n) {
   }
   const mine = edges.filter(e => e.from === n.id || e.to === n.id), checked = mine.filter(e => e.note);
   const title = id => (byId[id] || {}).title || id;
-  if (planned || checked.length || n.switch_note) {
+  if (!D.share && (planned || checked.length || n.switch_note)) { // 共有用は確かめた結果を抜いてある
     let body = "";
     if (n.switch_note) {
       const ok = !n.switch_note.includes("が無い");

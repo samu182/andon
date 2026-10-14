@@ -574,6 +574,8 @@ pub enum HeadHit {
     Changes,
     /// 今のタブを、ブラウザで操作できる HTML に書き出す
     Export,
+    /// 人に渡す用（AI に渡す文・ブランチ・ずれ・確かめた結果を抜く）
+    Share,
 }
 
 /// 上の帯（題・凡例・ずれと変化の数・操作の案内・何時の state か）。返すのは押せる所
@@ -595,9 +597,10 @@ pub fn header(p: &Painter, area: Rect, meta: &str, drift: usize, changes: usize)
     }
     let m = p.text(pos2(r.max.x - 14.0, y), Align2::RIGHT_CENTER, meta, f.clone(), DIM);
     // 書き出す（いつでも押せるが、目立たせない。見どころは 1 か所に絞る）
-    let ex = p.text(pos2(m.min.x - if meta.is_empty() { 0.0 } else { 24.0 }, y), Align2::RIGHT_CENTER, "書き出す", f, DIM);
+    let sh = p.text(pos2(m.min.x - if meta.is_empty() { 0.0 } else { 24.0 }, y), Align2::RIGHT_CENTER, "共有用", f.clone(), DIM);
+    let ex = p.text(pos2(sh.min.x - 16.0, y), Align2::RIGHT_CENTER, "書き出す", f, DIM);
     // 図と現物のずれ・前回からの変化。あるときだけ紺の文字で出し、押すと右に一覧
-    let mut hits = vec![(ex.expand(4.0), HeadHit::Export)];
+    let mut hits = vec![(sh.expand(4.0), HeadHit::Share), (ex.expand(4.0), HeadHit::Export)];
     let mut right = ex.min.x - 24.0;
     for (n, text, hit) in [(drift, format!("図と現物のずれ {drift}"), HeadHit::Drift), (changes, format!("前回から {changes} 件"), HeadHit::Changes)] {
         if n > 0 {

@@ -6,7 +6,9 @@
 //! 知らせて終わる（窓は増やさない）。
 //!   andon --dump-layout <out> [aspect] [段の上限]   並べた結果を JSON で書く（段の上限 1 なら Python の layout と同じ答え）
 //!   andon --export [<project>|all] [書き出す先]      その範囲を、ブラウザで操作できる HTML に書き出す（既定は全体・
-//!                                                    ~/.herdr/andon-export/）。窓の中では上の帯の「書き出す」か e キー
+//!                                                    ~/Downloads）。窓の中では上の帯の「書き出す」か e キー
+//!   andon --export-share [<project>|all] [書き出す先]  人に渡す用（AI に渡す文・ブランチ・ずれ・確かめた結果を抜く）。
+//!                                                    窓の中では上の帯の「共有用」か Shift+E
 //!
 //! 環境変数 ARCH_BENCH=<書き出す先> を付けると、図を 1 画素ずつ動かしながら 180 回描き直し、
 //! 1 回あたりの時間を書き出して閉じる（CPU で描く版と GPU で描く版を比べるため）。
@@ -62,7 +64,11 @@ fn main() {
         std::fs::write(out, body).expect("書き出せない");
         return;
     }
-    if args.get(1).map(String::as_str) == Some("--export") {
+    if let Some(share) = args.get(1).and_then(|a| match a.as_str() {
+        "--export" => Some(false),
+        "--export-share" => Some(true),
+        _ => None,
+    }) {
         let scope = match args.get(2).map(String::as_str) {
             None | Some("all") => String::new(),
             Some(p) => p.to_string(),
@@ -74,8 +80,8 @@ fn main() {
                 return Err(format!("{scope} の部品が無い"));
             }
             let lay = layout::layout(&view, 1.6, MAX_ROWS)?;
-            let path = args.get(3).map(std::path::PathBuf::from).unwrap_or_else(|| export::default_path(&st, &scope));
-            export::write(&path, &st, &view, &lay, &scope, &Default::default())?;
+            let path = args.get(3).map(std::path::PathBuf::from).unwrap_or_else(|| export::default_path(&st, &scope, share));
+            export::write(&path, &st, &view, &lay, &scope, &Default::default(), share)?;
             Ok(path)
         });
         // release では窓のプログラム（windows_subsystem）なので、コンソールには出ない。結果はファイルがあるかで見る
@@ -425,7 +431,8 @@ impl Viewer {
         });
         let [f_key, esc, r_key, s_key, right, left, space, e_key] = keys;
         if e_key {
-            self.export(); // e: 今のタブを、ブラウザで操作できる HTML に書き出して開く
+            // e: 今のタブを、ブラウザで操作できる HTML に書き出して開く。Shift+E は共有用
+            self.export(ui.input(|i| i.modifiers.shift));
         }
         if s_key {
             self.bones_only = !self.bones_only; // s: 骨格（ウォーキングスケルトン）以外を薄くする
@@ -561,21 +568,22 @@ impl Viewer {
             ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
         }
         match (head_resp.clicked(), over) {
-            (true, Some(draw::HeadHit::Export)) => self.export(),
+            (true, Some(draw::HeadHit::Export)) => self.export(false),
+            (true, Some(draw::HeadHit::Share)) => self.export(true),
             (true, Some(hit)) => (self.list, self.selected, self.bundle) = (Some(hit), None, None),
             _ => {}
         }
         self.bench_tick(&ctx, body);
     }
 
-    /// 今のタブ（窓で見ている中身と並べ方そのまま）を HTML に書き出し、既定のブラウザで開く
-    fn export(&mut self) {
+    /// 今のタブ（窓で見ている中身と並べ方そのまま）を HTML に書き出し、既定のブラウザで開く。share なら共有用
+    fn export(&mut self, share: bool) {
         let (Some(view), Some(lay), Some(st)) = (&self.view, &self.lay, &self.state) else {
             self.flash = Some(("まだ並べている（並べ終わってから書き出す）".into(), Instant::now()));
             return;
         };
-        let path = export::default_path(st, &self.scope);
-        let msg = match export::write(&path, st, view, lay, &self.scope, &self.working) {
+        let path = export::default_path(st, &self.scope, share);
+        let msg = match export::write(&path, st, view, lay, &self.scope, &self.working, share) {
             Ok(()) => {
                 self.ctx.open_url(egui::OpenUrl::new_tab(export::file_url(&path)));
                 format!("書き出した: {}", path.display())
