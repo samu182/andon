@@ -1,4 +1,4 @@
-//! 描く。arch_view.py の redraw の写し（見た目の決まりは向こうのコメントが正本）。
+//! 描く。元は claude-kanban の arch/arch_view.py の redraw の写し（2026-10-15 に向こうを消したので、見た目の決まりの正本はここ。消した版は claude-kanban で `git show 3ecf96f^:arch/arch_view.py`）。
 
 use crate::layout::{Layout, NODE_H, NODE_W, Pt, ZONE_HEAD};
 use crate::model::{Changes, Project, View, Work, bones, through};

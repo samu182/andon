@@ -1,4 +1,4 @@
-//! 並べ方。arch_view.py の layout をそのまま写したもの（座標を Python と突き合わせて確かめる。`--dump-layout`）。
+//! 並べ方。元は claude-kanban の arch/arch_view.py の layout の写し（2026-10-15 に向こうを消した。座標を突き合わせた `--dump-layout` は、消した版と比べるときに使う）。
 //! 枠ごとに中を Graphviz（dot）で並べ、枠どうしは左から決まった狭い間隔で並べる。座標は点（左上原点）。
 
 use crate::model::{Edge, Node, View};
