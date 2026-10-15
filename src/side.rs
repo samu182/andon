@@ -243,6 +243,7 @@ impl Side {
                         para(ui, &[("● ", plain(10.0), status_color(kind)), (&format!("{title}: "), plain(10.0), TEXT)]);
                         link(ui, names.get(other.as_str()).copied().unwrap_or(other), Action::Select(other.clone()), &mut out);
                         let lab = if e.label.is_empty() { String::new() } else { format!("（{}）", e.label) };
+                        let lab = if e.future { format!("{lab}（構想）") } else { lab };
                         let why = if e.blocked.is_empty() { String::new() } else { format!("　{}", e.blocked) };
                         if !lab.is_empty() || !why.is_empty() {
                             text(ui, &format!("{lab}{why}"), 10.0, TEXT);
@@ -291,6 +292,60 @@ impl Side {
         out
     }
 
+    /// 構想の部品の中身。短く: 名前・説明・作るかは未定・出所・知らせ・つながり（状態・次の一手・PR は持たない）
+    pub fn future_node(&mut self, ui: &mut Ui, st: &State, view: &View, n: &Node) -> Option<Action> {
+        let mut out = None;
+        let names: HashMap<&str, &str> = view.nodes.iter().map(|x| (x.id.as_str(), x.title.as_str())).collect();
+        ui.label(RichText::new(&n.title).font(bold(12.0)).color(TEXT));
+        ui.add_space(6.0);
+        text(ui, "構想（作るかは未定）", 10.0, FAINT);
+        if !n.sub.is_empty() {
+            ui.add_space(4.0);
+            text(ui, &n.sub, 10.0, TEXT);
+        }
+        if !n.note.is_empty() {
+            ui.add_space(4.0);
+            text(ui, &n.note, 9.0, FAINT);
+        }
+        label(ui, "出所");
+        if n.source.is_empty() {
+            text(ui, "書いていない（宣言の source に「<パス>#<目印>」を書く）", 9.0, FAINT);
+        } else {
+            // 「<project>:<パス>#<目印>」ならそのプロジェクトのリポジトリ、無ければ部品のプロジェクトのリポジトリ
+            let (path, _) = n.source.split_once('#').unwrap_or((n.source.as_str(), ""));
+            let (project, path) = match path.split_once(':') {
+                Some((p, rest)) if st.projects.contains_key(p) => (p, rest),
+                _ => (n.project.as_str(), path),
+            };
+            let gh = st.projects.get(project).map(|p| p.github.clone()).unwrap_or_default();
+            link_or_text(ui, &n.source, gh_url(&gh, &format!("blob/main/{path}")), &mut out);
+        }
+        let notes: Vec<&String> = [&n.promote, &n.source_note].into_iter().filter(|s| !s.is_empty()).collect();
+        if !notes.is_empty() {
+            label(ui, "知らせ");
+            for s in notes {
+                text(ui, s, 10.0, TEXT);
+            }
+        }
+        label(ui, "つながり");
+        let mine: Vec<_> = view.edges.iter().filter(|e| e.from == n.id || e.to == n.id).collect();
+        if mine.is_empty() {
+            text(ui, "線は無い", 9.0, FAINT);
+        }
+        for e in mine {
+            let (title, other) = if e.to == n.id { ("入ってくる", &e.from) } else { ("出ていく", &e.to) };
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                text(ui, &format!("{title}: "), 10.0, TEXT);
+                link(ui, names.get(other.as_str()).copied().unwrap_or(other), Action::Select(other.clone()), &mut out);
+                if !e.label.is_empty() {
+                    text(ui, &format!("（{}）", e.label), 10.0, TEXT);
+                }
+            });
+        }
+        out
+    }
+
     /// まとめた線の中身（どの部品からどの部品へ）
     pub fn bundle(&mut self, ui: &mut Ui, view: &View, lay: &Layout, bi: usize) -> Option<Action> {
         let b = &lay.bundles[bi];
@@ -314,6 +369,9 @@ impl Side {
                 link(ui, names.get(e.to.as_str()).unwrap_or(&""), Action::Select(e.to.clone()), &mut out);
                 if !e.label.is_empty() {
                     text(ui, &format!("（{}）", e.label), 10.0, TEXT);
+                }
+                if e.future {
+                    text(ui, "（構想）", 10.0, FAINT);
                 }
             });
             if !e.blocked.is_empty() {
@@ -365,7 +423,7 @@ pub fn drift_lines(st: &State, view: &View) -> Vec<Line> {
         FAINT,
     )];
     let Some(a) = &st.arch else { return lines };
-    let projects: std::collections::BTreeSet<&str> = view.nodes.iter().map(|n| n.project.as_str()).collect();
+    let projects: std::collections::BTreeSet<&str> = view.nodes.iter().filter(|n| !n.future).map(|n| n.project.as_str()).collect();
     for p in projects {
         let Some(d) = a.drift.get(p) else { continue };
         if d.unclaimed.is_empty() && d.missing.is_empty() && d.unplanned.is_empty() && d.stale_docs.is_empty() {
@@ -398,7 +456,7 @@ pub fn drift_lines(st: &State, view: &View) -> Vec<Line> {
 /// 図と現物のずれの数（今のタブに出ているプロジェクトだけ）
 pub fn drift_count(st: &State, view: &View) -> usize {
     let Some(a) = &st.arch else { return 0 };
-    let projects: std::collections::BTreeSet<&str> = view.nodes.iter().map(|n| n.project.as_str()).collect();
+    let projects: std::collections::BTreeSet<&str> = view.nodes.iter().filter(|n| !n.future).map(|n| n.project.as_str()).collect(); // 構想はずれに数えない
     projects.iter().filter_map(|p| a.drift.get(*p)).map(|d| d.unclaimed.len() + d.missing.len() + d.unplanned.len() + d.stale_docs.len()).sum()
 }
 

@@ -5,7 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>あんどん</title>
 <!-- あんどんの書き出し（andon の src/export.rs が中身を埋める）。描き方は draw.rs、右の欄は side.rs の写し。
-     その時点の写しなので、組み立て直しは追わない。ネットにはつながない -->
+     その時点の写しなので、組み立て直しは追わない。ネットにはつながない。
+     構想があれば（D.future）完成図の中身と並べ方も入っていて、「今｜完成図」か k で切り替える -->
 <style>
   :root {
     --bg: #eceef1; --dot: #d5d9de; --panel: #ffffff; --line: #d5d9de; --text: #1f2328; --dim: #4b535d; --faint: #636c76;
@@ -24,6 +25,9 @@
   header .right { margin-left: auto; display: flex; align-items: center; gap: 16px; font-size: 12px; color: var(--dim); }
   .hlink { color: var(--bone); font-weight: 700; cursor: pointer; background: none; border: 0; font: inherit; padding: 0; }
   .hlink:hover { text-decoration: underline; }
+  .mode { display: inline-flex; align-items: center; gap: 4px; color: var(--faint); }
+  .mode button { background: none; border: 0; padding: 0; font: 12px var(--font); color: var(--dim); cursor: pointer; }
+  .mode button.on { font-weight: 700; color: var(--text); }
   #stage { position: relative; min-height: 0; overflow: hidden;
            background-color: var(--bg); background-image: radial-gradient(var(--dot) 1px, transparent 1.3px);
            background-size: 22px 22px; background-position: 11px 11px; }
@@ -84,6 +88,7 @@
   <div class="right">
     <button class="hlink" id="drift" hidden></button>
     <button class="hlink" id="changes" hidden></button>
+    <span class="mode" id="mode" hidden><button data-m="now">今</button>｜<button data-m="full">完成図</button></span>
     <span class="help">ドラッグで移動・ホイールで拡大・f 全体・s 骨格だけ・←→ 骨格をたどる</span>
     <span id="meta"></span>
   </div>
@@ -98,7 +103,6 @@
 <script>
 "use strict";
 const D = JSON.parse(document.getElementById("data").textContent);
-const L = D.layout;
 const NODE_W = D.size.node_w, NODE_H = D.size.node_h, ZONE_HEAD = D.size.zone_head;
 const R_NODE = 6, R_ZONE = 10, MIN_FONT = 11, SIDE_W = 340, BLINK = 800;
 const C = {
@@ -112,6 +116,8 @@ const SHORT = { live: "本番", wip: "作りかけ", stop: "待ち" };
 const LONG = { live: "本番で動いている", wip: "作りかけ", stop: "待ち" };
 const DASH = { live: "", wip: "7 5", stop: "10 4 2 4" };
 const PROJECT_MARKS = ["#dce6f4", "#e7dcf4"];
+// 構想（完成図だけ）: 塗らず、細い点線と薄い文字だけ。状態の色は付けない
+const FUTURE_LINE = "#aab1b9", FUTURE_TEXT = "#8c959f", FUTURE_DASH = "2 4";
 const FAMILY = getComputedStyle(document.documentElement).getPropertyValue("--font");
 
 const statusColor = k => STATUS[k] || "#8c959f";
@@ -137,11 +143,24 @@ function clip(s, f, room) {
   return ch.join("") + "…";
 }
 
-// ---- 中身 ----
-const nodes = D.nodes, edges = D.edges, zones = D.zones;
-const byId = Object.fromEntries(nodes.map(n => [n.id, n]));
-const zoneOf = Object.fromEntries(nodes.map(n => [n.id, n.zone]));
+// ---- 中身（今の図と完成図。完成図の部品のうち、今の図にもあるものは id だけで入っている） ----
+const MODES = { now: { nodes: D.nodes, edges: D.edges, zones: D.zones, layout: D.layout, owners: D.owners } };
+if (D.future) {
+  const present = Object.fromEntries(D.nodes.map(n => [n.id, n]));
+  const f = D.future;
+  MODES.full = { nodes: f.nodes.map(n => (typeof n === "string" ? present[n] : n)), edges: f.edges, zones: f.zones, layout: f.layout, owners: f.owners };
+}
+let mode, nodes, edges, zones, L, byId, zoneOf, zoneMark, reasons, owners;
 let owner = D.owner || null;
+function useMode(m) {
+  mode = m;
+  ({ nodes, edges, zones, owners } = MODES[m]);
+  L = MODES[m].layout;
+  byId = Object.fromEntries(nodes.map(n => [n.id, n]));
+  zoneOf = Object.fromEntries(nodes.map(n => [n.id, n.zone]));
+  zoneMark = makeZoneMark();
+  reasons = makeReasons();
+}
 function stepOf(n) { return owner && n.steps && owner in n.steps ? n.steps[owner] : null; }
 function bones() { return nodes.filter(n => stepOf(n) != null).sort((a, b) => stepOf(a) - stepOf(b)); }
 function through() {
@@ -264,16 +283,17 @@ function projectMark(color) {
   const hit = c && table.find(([k]) => c.includes(k));
   return hit ? hit[1] : null;
 }
-const zoneMark = (() => {
+function makeZoneMark() {
   let i = 0;
   const m = {};
   for (const z of zones) {
-    if (["external", "company", "cloud"].includes(z.kind)) m[z.id] = C.kind;
+    // 構想だけの枠は塗らない（色を順に配るのも、今の枠の色をずらさないように飛ばす）
+    if (z.future || ["external", "company", "cloud"].includes(z.kind)) m[z.id] = C.kind;
     else m[z.id] = projectMark((D.projects[z.project] || {}).color) || PROJECT_MARKS[i++ % 2];
   }
   return m;
-})();
-const reasons = (() => {
+}
+function makeReasons() {
   const r = {};
   zones.forEach((z, zi) => {
     const groups = [];
@@ -281,7 +301,8 @@ const reasons = (() => {
     groups.forEach((g, gi) => (r[`z${zi}_b${gi}`] = g));
   });
   return r;
-})();
+}
+useMode(D.future && D.start_full ? "full" : "now");
 
 function diagram(cam) {
   out = [];
@@ -293,12 +314,14 @@ function diagram(cam) {
     if (reasons[f.key]) { rect(r, 0, null, C.faint, 1, "4 3"); tags.push([r, reasons[f.key]]); continue; }
     const z = zones[+f.key.slice(1)];
     if (!z) continue;
-    rect(r, R_ZONE * s, zoneMark[z.id], C.cardLine, 1);
+    // 構想だけの枠: 塗らず、点線の輪郭と薄い文字
+    if (z.future) rect(r, R_ZONE * s, null, FUTURE_LINE, 1, FUTURE_DASH);
+    else rect(r, R_ZONE * s, zoneMark[z.id], C.cardLine, 1);
     const tf = font(14 * s, true), sf = font(9 * s, false), head = ZONE_HEAD * s;
     const top = Math.max(Math.min(10 * s, (head - tf.size - sf.size - 4) / 2), 3), room = r.x1 - r.x0 - 32 * s;
-    const t = text(r.x0 + 16 * s, r.y0 + top, "lt", clip(z.title, tf, room), tf, C.text);
+    const t = text(r.x0 + 16 * s, r.y0 + top, "lt", clip(z.title, tf, room), tf, z.future ? FUTURE_TEXT : C.text);
     if (z.sub && t.y1 + 2 + sf.size <= r.y0 + head - 2)
-      text(r.x0 + 16 * s, Math.min(r.y0 + 33 * s, t.y1 + 2), "lt", clip(z.sub, sf, room), sf, C.dim);
+      text(r.x0 + 16 * s, Math.min(r.y0 + 33 * s, t.y1 + 2), "lt", clip(z.sub, sf, room), sf, z.future ? FUTURE_TEXT : C.dim);
   }
   const mine = edges.map((e, i) => i).filter(i => fnode && (edges[i].from === fnode || edges[i].to === fnode));
   const near = new Set(fnode ? [fnode] : []);
@@ -306,9 +329,10 @@ function diagram(cam) {
   const crowd = { boxes: [], lines: [] }, labels = [];
   L.bundles.forEach((b, bi) => {
     const pts = b.points.map(q => xy(cam, q)), quiet = !!fnode || st.bonesOnly;
+    const future = b.kind === "future"; // 構想の線だけの束（今の線とは混ぜていない）。本数の札は付けない
     crowd.lines.push([pts, 10000 + bi]);
-    polyline(pts, quiet ? 1 : 2, quiet ? C.quiet : C.edge, dash(b.kind), b.arrow, [9, 10, 4]);
-    if (!quiet) labels.push([`${b.edges.length} 本`, font(9 * s), pts, 10000 + bi]);
+    polyline(pts, quiet || future ? 1 : 2, quiet ? C.quiet : future ? FUTURE_LINE : C.edge, future ? FUTURE_DASH : dash(b.kind), b.arrow, [9, 10, 4]);
+    if (!quiet && !future) labels.push([`${b.edges.length} 本`, font(9 * s), pts, 10000 + bi]);
   });
   edges.forEach((e, i) => {
     const strong = mine.includes(i), path = L.paths[i];
@@ -316,7 +340,7 @@ function diagram(cam) {
     const pts = path.points.map(q => xy(cam, q)), kind = kindOf(e);
     const faded = (st.bonesOnly && !e.skeleton) || (fnode && !strong);
     crowd.lines.push([pts, 20000 + i]);
-    polyline(pts, strong ? 2 : 1, faded ? C.quiet : strong ? C.bone : C.edge, dash(kind), "last", [8, 9, 3]);
+    polyline(pts, strong ? 2 : 1, faded ? C.quiet : strong ? C.bone : e.future ? FUTURE_LINE : C.edge, e.future ? FUTURE_DASH : dash(kind), "last", [8, 9, 3]);
     if (e.label && (strong || st.hoverEdge === i)) labels.push([e.label, font(9 * s), pts, 20000 + i]);
   });
   const sk = through(), w = NODE_W * s;
@@ -331,6 +355,14 @@ function diagram(cam) {
     const two = r.y1 - r.y0 >= (tf.size + sf.size) * 1.3 + 4;
     const titleY = two ? r.y0 + Math.max(15 * s, tf.size * 0.5 + 3) : (r.y0 + r.y1) / 2;
     const subY = r.y1 - Math.max(14 * s, sf.size * 0.5 + 3);
+    if (n.future) {
+      // 構想: 塗らない。細い点線の輪郭と薄い文字だけ（状態・骨格の番号・作業中・変化は持たない）
+      const [line, ink] = faded ? [C.quiet, FUTURE_LINE] : sel ? [C.bone, FUTURE_TEXT] : [FUTURE_LINE, FUTURE_TEXT];
+      rect(r, R_NODE * s, null, line, sel ? 2 : 1, FUTURE_DASH);
+      text(r.x0 + pad, titleY, "lc", clip(n.title, tf, w - pad * 2), tf, ink);
+      if (two) text(r.x0 + pad, subY, "lc", clip(n.sub, sf, w - pad * 2), sf, ink);
+      return;
+    }
     if (faded) {
       rect(r, R_NODE * s, C.bg, C.quiet, 1);
       text(r.x0 + pad, titleY, "lc", clip(n.title, tf, w - pad * 2 - 16 * s), tf, C.faint);
@@ -383,7 +415,15 @@ function header() {
     return `<span><svg width="24" height="10"><line x1="0" y1="5" x2="24" y2="5" stroke="${C.edge}" ${d ? `stroke-dasharray="${d}"` : ""}/></svg>` +
       `<svg width="16" height="11"><rect x=".5" y=".5" width="15" height="10" rx="3" fill="${tint(k)}" stroke="${C.cardLine}" ${k === "none" ? 'stroke-dasharray="3 2"' : ""}/></svg>${short(k)}</span>`;
   });
+  if (mode === "full") // 完成図のときだけ: 構想（塗らない点線）
+    leg.push(`<span><svg width="24" height="10"><line x1="0" y1="5" x2="24" y2="5" stroke="${FUTURE_LINE}" stroke-dasharray="${FUTURE_DASH}"/></svg>` +
+      `<svg width="16" height="11"><rect x=".5" y=".5" width="15" height="10" rx="3" fill="none" stroke="${FUTURE_LINE}" stroke-dasharray="2 2"/></svg>構想</span>`);
   document.getElementById("legend").innerHTML = leg.join("");
+  // 今｜完成図（構想があるときだけ）
+  const md = document.getElementById("mode");
+  md.hidden = !MODES.full;
+  md.querySelectorAll("button").forEach(b => { b.classList.toggle("on", b.dataset.m === mode); b.onclick = () => setMode(b.dataset.m); });
+  document.querySelector(".help").textContent = "ドラッグで移動・ホイールで拡大・f 全体・s 骨格だけ・←→ 骨格をたどる" + (MODES.full ? "・k 完成図" : "");
   const at = D.generated_at || "";
   document.getElementById("meta").textContent = `${at.slice(5, 10).replace("-", "/")} ${at.slice(11, 16)} 時点の写し${D.share ? "（共有用）" : ""}`;
   const nd = driftCount(), nc = D.changes ? Object.keys(D.changes.nodes).length : 0;
@@ -397,7 +437,7 @@ function strip() {
   const el = document.getElementById("strip"), b = bones();
   if (!b.length) { el.innerHTML = `<span class="none">骨格なし</span>`; return; }
   const sk = through();
-  let h = D.owners.length > 1 ? `<span class="owner" id="owner">${esc(owner)} ›</span>` : "";
+  let h = owners.length > 1 ? `<span class="owner" id="owner">${esc(owner)} ›</span>` : "";
   for (const n of b) {
     const step = stepOf(n), done = step <= sk.through, on = st.selected === n.id;
     const cls = ["chip", done && "done", on && "on", sk.next === n.id && !on && "next"].filter(Boolean).join(" ");
@@ -406,7 +446,7 @@ function strip() {
   el.innerHTML = h;
   el.querySelectorAll(".chip").forEach(x => (x.onclick = () => { select(x.dataset.id); centerOn(x.dataset.id, true); update(); }));
   const o = document.getElementById("owner");
-  if (o) o.onclick = () => { owner = D.owners[(D.owners.indexOf(owner) + 1) % D.owners.length]; st.flow = null; update(); };
+  if (o) o.onclick = () => { owner = owners[(owners.indexOf(owner) + 1) % owners.length]; st.flow = null; update(); };
 }
 
 // ---- 右の欄（side.rs の写し） ----
@@ -469,7 +509,7 @@ function nodeSide(n) {
   for (const [t, incoming] of [["入ってくる", true], ["出ていく", false]])
     for (const e of mine.filter(e => (incoming ? e.to === n.id : e.from === n.id))) {
       const other = incoming ? e.from : e.to;
-      body += `<div class="line">${dotc(kindOf(e))}${t}: ${selLink(other, title(other))}${e.label ? `（${esc(e.label)}）` : ""}${e.blocked ? `　${esc(e.blocked)}` : ""}</div>`;
+      body += `<div class="line">${dotc(kindOf(e))}${t}: ${selLink(other, title(other))}${e.label ? `（${esc(e.label)}）` : ""}${e.future ? "（構想）" : ""}${e.blocked ? `　${esc(e.blocked)}` : ""}</div>`;
     }
   h += details("つながり", `（入る ${ins}・出る ${mine.length - ins}）`, false, body);
   if (planned) {
@@ -489,18 +529,43 @@ function nodeSide(n) {
   h += links.length ? `<div class="links">${links.join("")}</div>` : `<div class="faint">リンクが無い（宣言に paths・docs を足すと、コードと設計へ飛べる）</div>`;
   return h;
 }
+// 構想の部品の中身（side.rs の future_node の写し）。短く: 名前・説明・作るかは未定・出所・知らせ・つながり
+function futureSide(n) {
+  const title = id => (byId[id] || {}).title || id;
+  let h = `<h2>${esc(n.title)}</h2><div class="faint">構想（作るかは未定）</div>`;
+  if (n.sub) h += `<div style="margin-top:4px">${esc(n.sub)}</div>`;
+  if (n.note) h += `<div class="faint" style="margin-top:4px">${esc(n.note)}</div>`;
+  h += `<div class="lab">出所</div>`;
+  if (!n.source) h += `<div class="faint">書いていない（宣言の source に「&lt;パス&gt;#&lt;目印&gt;」を書く）</div>`;
+  else {
+    let path = n.source.split("#")[0], project = n.project;
+    const i = path.indexOf(":");
+    if (i > 0 && D.projects[path.slice(0, i)]) { project = path.slice(0, i); path = path.slice(i + 1); }
+    h += `<div>${linkOr(n.source, ghUrl(gh(project), `blob/main/${path}`))}</div>`;
+  }
+  const notes = [n.promote, n.source_note].filter(Boolean);
+  if (notes.length) h += `<div class="lab">知らせ</div>` + notes.map(x => `<div>${esc(x)}</div>`).join("");
+  h += `<div class="lab">つながり</div>`;
+  const mine = edges.filter(e => e.from === n.id || e.to === n.id);
+  if (!mine.length) h += `<div class="faint">線は無い</div>`;
+  for (const e of mine) {
+    const [t, other] = e.to === n.id ? ["入ってくる", e.from] : ["出ていく", e.to];
+    h += `<div class="line">${t}: ${selLink(other, title(other))}${e.label ? `（${esc(e.label)}）` : ""}</div>`;
+  }
+  return h;
+}
 function bundleSide(bi) {
   const b = L.bundles[bi], zt = id => (zones.find(z => z.id === id) || {}).title || "";
   let h = `<h2>${esc(zt(b.zones[0]))} と ${esc(zt(b.zones[1]))}</h2><div class="faint">${b.edges.length} 本の線をまとめている（色は中でいちばん悪い状態）</div>`;
   for (const i of b.edges) {
     const e = edges[i];
-    h += `<div class="line">${dotc(kindOf(e))}${selLink(e.from, (byId[e.from] || {}).title || "")} → ${selLink(e.to, (byId[e.to] || {}).title || "")}${e.label ? `（${esc(e.label)}）` : ""}</div>`;
+    h += `<div class="line">${dotc(kindOf(e))}${selLink(e.from, (byId[e.from] || {}).title || "")} → ${selLink(e.to, (byId[e.to] || {}).title || "")}${e.label ? `（${esc(e.label)}）` : ""}${e.future ? `<span class="faint">（構想）</span>` : ""}</div>`;
     if (e.blocked) h += `<div style="color:${statusColor("stop")}">　${esc(e.blocked)}</div>`;
     if (e.note) h += `<div class="faint">　${esc(e.note)}</div>`;
   }
   return h;
 }
-function driftProjects() { return [...new Set(nodes.map(n => n.project))].sort(); }
+function driftProjects() { return [...new Set(nodes.filter(n => !n.future).map(n => n.project))].sort(); } // 構想はずれに数えない
 function driftCount() {
   return driftProjects().map(p => D.drift[p]).filter(Boolean)
     .reduce((a, d) => a + (d.unclaimed || []).length + (d.missing || []).length + (d.unplanned || []).length + (d.stale_docs || []).length, 0);
@@ -532,11 +597,11 @@ function changesSide() {
 }
 let sideShown = null;
 function sidePanel() {
-  const key = JSON.stringify([st.selected, st.bundle, st.list, owner]);
+  const key = JSON.stringify([st.selected, st.bundle, st.list, owner, mode]);
   if (key === sideShown) return;
   sideShown = key;
   let h = "";
-  if (st.selected && byId[st.selected]) h = nodeSide(byId[st.selected]);
+  if (st.selected && byId[st.selected]) h = byId[st.selected].future ? futureSide(byId[st.selected]) : nodeSide(byId[st.selected]);
   else if (st.bundle != null && L.bundles[st.bundle]) h = bundleSide(st.bundle);
   else if (st.list === "drift") h = driftSide();
   else if (st.list === "changes") h = changesSide();
@@ -565,6 +630,15 @@ function flash(m) {
 
 // ---- 操作 ----
 function select(id) { Object.assign(st, { selected: id, bundle: null, list: null }); }
+// 今の図と完成図を切り替える（並べ方は両方入っているので、並べ直さない）
+function setMode(m) {
+  if (!MODES[m] || m === mode) return;
+  useMode(m);
+  if (st.selected && !byId[st.selected]) st.selected = null;
+  Object.assign(st, { bundle: null, moved: false, hoverNode: null, hoverEdge: null }); // まとめた線の番号は図ごとに違う
+  header();
+  update();
+}
 function centerOn(id, always) {
   const c = L.pos[id];
   if (!c || !st.cam) return;
@@ -672,6 +746,7 @@ document.addEventListener("keydown", ev => {
   const k = ev.key;
   if (k === "f") st.moved = false;
   else if (k === "s") st.bonesOnly = !st.bonesOnly;
+  else if (k === "k") { setMode(mode === "full" ? "now" : "full"); return; }
   else if (k === "ArrowRight") flowGo(1);
   else if (k === "ArrowLeft") flowGo(-1);
   else if (k === " ") { ev.preventDefault(); flowPlay(); }

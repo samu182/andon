@@ -17,8 +17,10 @@ pub enum Msg {
     Open(String),
 }
 
+/// 環境変数 ARCH_PORT で番号を替えられる（開いている窓に触らずに、もう 1 つ開いて確かめるため）
 fn addr() -> SocketAddr {
-    SocketAddr::from(([127, 0, 0, 1], PORT))
+    let port = std::env::var("ARCH_PORT").ok().and_then(|s| s.parse().ok()).unwrap_or(PORT);
+    SocketAddr::from(([127, 0, 0, 1], port))
 }
 
 /// 決まった番号の口を握る。握れなければ、もう開いている。

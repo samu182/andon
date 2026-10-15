@@ -492,13 +492,14 @@ pub fn layout(view: &View, aspect: f64, max_rows: usize) -> Result<Layout, Strin
 }
 
 /// 枠をまたぐ線を、枠の組ごとに 1 本にまとめる。端は枠の、相手に向いた辺（高さは関わる部品の平均）。
+/// 構想の線（完成図だけ）は今の線と混ぜず、別の 1 本にまとめる（今の線の本数・色を変えない）。
 fn bundles(view: &View, pos: &HashMap<String, Pt>, zone_of: &HashMap<&str, &str>, zone_rect: &HashMap<&str, usize>, rects: &[[f64; 4]], channels: &[f64]) -> Vec<Bundle> {
     let mut groups: Vec<((String, String), Vec<usize>)> = vec![];
     for (i, e) in view.edges.iter().enumerate() {
         let (za, zb) = (zone_of[e.from.as_str()], zone_of[e.to.as_str()]);
         if za != zb {
             let key = if za <= zb { (za.to_string(), zb.to_string()) } else { (zb.to_string(), za.to_string()) };
-            match groups.iter_mut().find(|g| g.0 == key) {
+            match groups.iter_mut().find(|g| g.0 == key && view.edges[g.1[0]].future == e.future) {
                 Some(g) => g.1.push(i),
                 None => groups.push((key, vec![i])),
             }
@@ -568,4 +569,45 @@ fn bundles(view: &View, pos: &HashMap<String, Pt>, zone_of: &HashMap<&str, &str>
             Bundle { zones: (za.clone(), zb.clone()), edges: idx.clone(), kind, arrow: arrow.to_string(), points: path.points, label_at: path.label_at }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Arch, State, view_mode};
+
+    /// 今: 枠 2 つ・部品 2 つ・枠をまたぐ線 1 本。構想: 構想だけの枠に 1 つと、今の枠に 1 つ、枠をまたぐ構想の線 1 本
+    fn arch() -> Arch {
+        let st: State = serde_json::from_value(serde_json::json!({ "arch": {
+            "zones": [{ "id": "p:a", "kind": "project" }, { "id": "p:b", "kind": "project" }],
+            "nodes": [{ "id": "p:x", "zone": "p:a", "project": "p", "status": "live" }, { "id": "p:y", "zone": "p:b", "project": "p", "status": "wip" }],
+            "edges": [{ "from": "p:x", "to": "p:y", "status": "live" }],
+            "future": {
+                "zones": [{ "id": "p:later", "kind": "project" }],
+                "nodes": [{ "id": "p:f1", "zone": "p:later", "project": "p" }, { "id": "p:f2", "zone": "p:b", "project": "p" }],
+                "edges": [{ "from": "p:x", "to": "p:f2", "status": "future" }, { "from": "p:f2", "to": "p:f1", "status": "future" }]
+            }
+        }}))
+        .unwrap();
+        st.arch.unwrap()
+    }
+
+    #[test]
+    fn 構想は完成図のときだけ並べ_今の線とは別にまとめる() {
+        let a = arch();
+        let now = layout(&view_mode(&a, "", None, false), 1.6, 3).unwrap();
+        assert_eq!(now.pos.len(), 2);
+        assert!(!now.pos.contains_key("p:f1"));
+        assert_eq!(now.bundles.len(), 1);
+        // 今は、構想を読まない view と同じ答え
+        let plain = layout(&crate::model::view_for(&a, "", None), 1.6, 3).unwrap();
+        assert_eq!(serde_json::to_string(&now.paths).unwrap(), serde_json::to_string(&plain.paths).unwrap());
+        assert_eq!(now.size, plain.size);
+        let full = layout(&view_mode(&a, "", None, true), 1.6, 3).unwrap();
+        assert_eq!(full.pos.len(), 4);
+        assert!(full.pos.contains_key("p:f1") && full.pos.contains_key("p:f2"));
+        let kinds: Vec<(&str, usize)> = full.bundles.iter().map(|b| (b.kind.as_str(), b.edges.len())).collect();
+        assert!(kinds.contains(&("live", 1)), "{kinds:?}"); // 今の線の束は 1 本のまま、色も変わらない
+        assert!(kinds.iter().filter(|k| k.0 == "future").count() == 2, "{kinds:?}");
+    }
 }

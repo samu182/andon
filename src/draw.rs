@@ -29,6 +29,10 @@ const WHITE: Color32 = hex(0xffffff);
 pub const ERROR: Color32 = hex(0xcf222e); // 赤はエラーだけ（待ちはエラーではない）
 const KIND_MARK: Color32 = hex(0xe2e5e9); // 外部・社内の仕組み・外部サービスは無彩色の淡い灰色
 const PROJECT_MARKS: [Color32; 2] = [hex(0xdce6f4), hex(0xe7dcf4)]; // 青と紫（明るさ・鮮やかさは同じで、色相だけ変える）
+// 構想（完成図だけ）: 塗らず、細い点線と薄い文字だけ。状態の色は付けない（作るかは未定なので、今の図より前に出さない）
+const FUTURE_LINE: Color32 = hex(0xaab1b9);
+const FUTURE_TEXT: Color32 = hex(0x8c959f);
+const FUTURE_DASH: [f32; 2] = [2.0, 4.0];
 
 /// プロジェクトの枠の淡い色。kanban.json の "color"（カンバンの画面と同じ色の名前）の系統で決める。無ければ None（青と紫を順に）
 fn project_mark(color: &str) -> Option<Color32> {
@@ -408,8 +412,8 @@ pub fn diagram(p: &Painter, view: &View, lay: &Layout, changes: &Changes, projec
         .zones
         .iter()
         .map(|z| {
-            let mark = if matches!(z.kind.as_str(), "external" | "company" | "cloud") {
-                KIND_MARK
+            let mark = if z.future || matches!(z.kind.as_str(), "external" | "company" | "cloud") {
+                KIND_MARK // 構想だけの枠は塗らない（色を順に配るのも、今の枠の色をずらさないように飛ばす）
             } else {
                 projects.get(&z.project).and_then(|pr| project_mark(pr.color.as_deref()?)).unwrap_or_else(|| *marks.next().unwrap())
             };
@@ -440,16 +444,22 @@ pub fn diagram(p: &Painter, view: &View, lay: &Layout, changes: &Changes, projec
             continue;
         }
         let Some(z) = f.key[1..].parse::<usize>().ok().and_then(|i| view.zones.get(i)) else { continue };
-        rounded(p, r, R_ZONE * s, Some(zone_mark[z.id.as_str()]), Some((1.0, CARD_LINE)), &[]);
+        // 構想だけの枠: 塗らず、点線の輪郭と薄い文字
+        let (fill, line, pattern, ink, sub_ink) = if z.future {
+            (None, FUTURE_LINE, &FUTURE_DASH[..], FUTURE_TEXT, FUTURE_TEXT)
+        } else {
+            (Some(zone_mark[z.id.as_str()]), CARD_LINE, &[][..], TEXT, DIM)
+        };
+        rounded(p, r, R_ZONE * s, fill, Some((1.0, line)), pattern);
         // 名前と説明は、枠の上の空き（ZONE_HEAD）に収める。文字の下限で大きくなった分は詰め、入らなければ説明を出さない
         let (tf, sf) = (font(14.0 * s, true), font(9.0 * s, false));
         let head = ZONE_HEAD as f32 * s;
         let top = (10.0 * s).min((head - tf.size - sf.size - 4.0) / 2.0).max(3.0);
         let room = r.width() - 32.0 * s;
-        let t = p.text(r.min + vec2(16.0 * s, top), Align2::LEFT_TOP, clip(p, &z.title, &tf, room), tf, TEXT);
+        let t = p.text(r.min + vec2(16.0 * s, top), Align2::LEFT_TOP, clip(p, &z.title, &tf, room), tf, ink);
         if !z.sub.is_empty() && t.max.y + 2.0 + sf.size <= r.min.y + head - 2.0 {
             let y = (r.min.y + 33.0 * s).min(t.max.y + 2.0);
-            p.text(pos2(r.min.x + 16.0 * s, y), Align2::LEFT_TOP, clip(p, &z.sub, &sf, room), sf, DIM);
+            p.text(pos2(r.min.x + 16.0 * s, y), Align2::LEFT_TOP, clip(p, &z.sub, &sf, room), sf, sub_ink);
         }
     }
     // 線。普段は枠の中の線と、枠どうしをまとめた線だけ。部品を押す・乗せると、その部品の線を行き先まで出す
@@ -462,10 +472,11 @@ pub fn diagram(p: &Painter, view: &View, lay: &Layout, changes: &Changes, projec
     for (bi, b) in lay.bundles.iter().enumerate() {
         let pts: Vec<Pos2> = b.points.iter().map(|q| cam.xy(*q)).collect();
         let quiet = fnode.is_some() || focus.bones_only;
+        let future = b.kind == "future"; // 構想の線だけの束（今の線とは混ぜていない）。本数の札は付けない
         crowd.lines.push((pts.clone(), 10_000 + bi));
-        let (w, c) = if quiet { (1.0, EDGE_QUIET) } else { (2.0, EDGE) };
-        polyline(p, pts.clone(), w, c, dash(&b.kind), &b.arrow, (9.0, 10.0, 4.0));
-        if !quiet {
+        let (w, c) = if quiet { (1.0, EDGE_QUIET) } else if future { (1.0, FUTURE_LINE) } else { (2.0, EDGE) };
+        polyline(p, pts.clone(), w, c, if future { &FUTURE_DASH } else { dash(&b.kind) }, &b.arrow, (9.0, 10.0, 4.0));
+        if !quiet && !future {
             labels.push((format!("{} 本", b.edges.len()), font(9.0 * s, false), pts, 10_000 + bi));
         }
     }
@@ -477,9 +488,10 @@ pub fn diagram(p: &Painter, view: &View, lay: &Layout, changes: &Changes, projec
         let pts: Vec<Pos2> = path.points.iter().map(|q| cam.xy(*q)).collect();
         let kind = if e.blocked.is_empty() { e.status.as_str() } else { "stop" };
         let faded = (focus.bones_only && !e.skeleton) || (fnode.is_some() && !strong);
-        let color = if faded { EDGE_QUIET } else if strong { BONE } else { EDGE };
+        let color = if faded { EDGE_QUIET } else if strong { BONE } else if e.future { FUTURE_LINE } else { EDGE };
         crowd.lines.push((pts.clone(), 20_000 + i));
-        polyline(p, pts.clone(), if strong { 2.0 } else { 1.0 }, color, dash(kind), "last", (8.0, 9.0, 3.0));
+        let pattern = if e.future { &FUTURE_DASH[..] } else { dash(kind) };
+        polyline(p, pts.clone(), if strong { 2.0 } else { 1.0 }, color, pattern, "last", (8.0, 9.0, 3.0));
         if !e.label.is_empty() && (strong || focus.hover_edge == Some(i)) {
             labels.push((e.label.clone(), font(9.0 * s, false), pts, 20_000 + i)); // 名札は、その線を見ているときだけ
         }
@@ -500,6 +512,16 @@ pub fn diagram(p: &Painter, view: &View, lay: &Layout, changes: &Changes, projec
         let two = r.height() >= (tf.size + sf.size) * 1.3 + 4.0;
         let title_y = if two { r.min.y + (15.0 * s).max(tf.size * 0.5 + 3.0) } else { r.center().y };
         let sub_y = r.max.y - (14.0 * s).max(sf.size * 0.5 + 3.0);
+        if n.future {
+            // 構想: 塗らない。細い点線の輪郭と薄い文字だけ（状態・骨格の番号・作業中・変化は持たない）
+            let (line, ink) = if faded { (EDGE_QUIET, FUTURE_LINE) } else if sel { (BONE, FUTURE_TEXT) } else { (FUTURE_LINE, FUTURE_TEXT) };
+            rounded(p, r, R_NODE * s, None, Some((if sel { 2.0 } else { 1.0 }, line)), &FUTURE_DASH);
+            p.text(pos2(r.min.x + pad, title_y), Align2::LEFT_CENTER, clip(p, &n.title, &tf, w - pad * 2.0), tf, ink);
+            if two {
+                p.text(pos2(r.min.x + pad, sub_y), Align2::LEFT_CENTER, clip(p, &n.sub, &sf, w - pad * 2.0), sf, ink);
+            }
+            continue;
+        }
         if faded {
             rounded(p, r, R_NODE * s, Some(BG), Some((1.0, EDGE_QUIET)), &[]);
             p.text(pos2(r.min.x + pad, title_y), Align2::LEFT_CENTER, clip(p, &n.title, &tf, w - pad * 2.0 - 16.0 * s), tf, FAINT);
@@ -576,10 +598,15 @@ pub enum HeadHit {
     Export,
     /// 人に渡す用（AI に渡す文・ブランチ・ずれ・確かめた結果を抜く）
     Share,
+    /// 今の図にする
+    Present,
+    /// 完成図（今の図に構想を薄く足す）にする
+    Full,
 }
 
-/// 上の帯（題・凡例・ずれと変化の数・操作の案内・何時の state か）。返すのは押せる所
-pub fn header(p: &Painter, area: Rect, meta: &str, drift: usize, changes: usize) -> Vec<(Rect, HeadHit)> {
+/// 上の帯（題・凡例・ずれと変化の数・操作の案内・何時の state か）。返すのは押せる所。
+/// mode: 構想があれば、今の図か完成図か（Some(true) = 完成図）。構想が無ければ None で、切り替えを出さない
+pub fn header(p: &Painter, area: Rect, meta: &str, drift: usize, changes: usize, mode: Option<bool>) -> Vec<(Rect, HeadHit)> {
     let r = Rect::from_min_size(area.min, vec2(area.width(), HEAD_H));
     p.rect_filled(r, 0.0, PANEL);
     p.line_segment([pos2(r.min.x, r.max.y), pos2(r.max.x, r.max.y)], Stroke::new(1.0_f32, LINE));
@@ -595,6 +622,14 @@ pub fn header(p: &Painter, area: Rect, meta: &str, drift: usize, changes: usize)
         x += 8.0;
         x = p.text(pos2(x + 8.0, y), Align2::LEFT_CENTER, status_short(k), f.clone(), DIM).max.x + 18.0;
     }
+    if mode == Some(true) {
+        // 完成図のときだけ: 構想（塗らない点線）
+        polyline(p, vec![pos2(x, y), pos2(x + 24.0, y)], 1.0, FUTURE_LINE, &FUTURE_DASH, "", (0.0, 0.0, 0.0));
+        x += 30.0;
+        let chip = Rect::from_center_size(pos2(x + 4.0, y), vec2(16.0, 11.0));
+        rounded(p, chip, 3.0, None, Some((1.0, FUTURE_LINE)), &[2.0, 2.0]);
+        p.text(pos2(x + 16.0, y), Align2::LEFT_CENTER, "構想", f.clone(), DIM);
+    }
     let m = p.text(pos2(r.max.x - 14.0, y), Align2::RIGHT_CENTER, meta, f.clone(), DIM);
     // 書き出す（いつでも押せるが、目立たせない。見どころは 1 か所に絞る）
     let sh = p.text(pos2(m.min.x - if meta.is_empty() { 0.0 } else { 24.0 }, y), Align2::RIGHT_CENTER, "共有用", f.clone(), DIM);
@@ -602,6 +637,16 @@ pub fn header(p: &Painter, area: Rect, meta: &str, drift: usize, changes: usize)
     // 図と現物のずれ・前回からの変化。あるときだけ紺の文字で出し、押すと右に一覧
     let mut hits = vec![(sh.expand(4.0), HeadHit::Share), (ex.expand(4.0), HeadHit::Export)];
     let mut right = ex.min.x - 24.0;
+    if let Some(full) = mode {
+        // 今｜完成図。選んでいる方を太く濃く
+        let (on, off) = (font(9.0, true), font(9.0, false));
+        let b = p.text(pos2(right, y), Align2::RIGHT_CENTER, "完成図", if full { on.clone() } else { off.clone() }, if full { TEXT } else { DIM });
+        let bar = p.text(pos2(b.min.x - 4.0, y), Align2::RIGHT_CENTER, "｜", off.clone(), FAINT);
+        let a = p.text(pos2(bar.min.x - 4.0, y), Align2::RIGHT_CENTER, "今", if full { off } else { on }, if full { DIM } else { TEXT });
+        hits.push((a.expand(4.0), HeadHit::Present));
+        hits.push((b.expand(4.0), HeadHit::Full));
+        right = a.min.x - 24.0;
+    }
     for (n, text, hit) in [(drift, format!("図と現物のずれ {drift}"), HeadHit::Drift), (changes, format!("前回から {changes} 件"), HeadHit::Changes)] {
         if n > 0 {
             let b = p.text(pos2(right, y), Align2::RIGHT_CENTER, text, font(9.0, true), BONE);

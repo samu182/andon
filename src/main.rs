@@ -4,7 +4,8 @@
 //!   andon <project>|all           その範囲のタブで開く
 //! すでに開いていれば、開いている窓に「その範囲（渡された範囲か、今選んでいるペインのプロジェクト）のタブを足して前に出て」と
 //! 知らせて終わる（窓は増やさない）。
-//!   andon --dump-layout <out> [aspect] [段の上限]   並べた結果を JSON で書く（段の上限 1 なら Python の layout と同じ答え）
+//!   andon --dump-layout <out> [aspect] [段の上限] [future]   並べた結果を JSON で書く（段の上限 1 なら Python の layout と
+//!                                                    同じ答え。future を付けると完成図）
 //!   andon --export [<project>|all] [書き出す先]      その範囲を、ブラウザで操作できる HTML に書き出す（既定は全体・
 //!                                                    ~/Downloads）。窓の中では上の帯の「書き出す」か e キー
 //!   andon --export-share [<project>|all] [書き出す先]  人に渡す用（AI に渡す文・ブランチ・ずれ・確かめた結果を抜く）。
@@ -14,6 +15,8 @@
 //! 1 回あたりの時間を書き出して閉じる（CPU で描く版と GPU で描く版を比べるため）。
 //! 環境変数 ARCH_SELECT=<部品の id> を付けると、その部品を選んだ状態で開く（右の欄を撮って確かめるため）。
 //! ARCH_SELECT=list:drift / list:changes なら、図と現物のずれ・前回からの変化の一覧を出して開く。
+//! 環境変数 ARCH_FUTURE=1 を付けると、完成図（構想を薄く足した図）で開く。窓の中では上の帯の「今｜完成図」か k キー。
+//! 環境変数 ARCH_PORT=<番号> を付けると、2 つ目を開かないための口の番号を替える（開いている窓に触らずに確かめるため）。
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -54,9 +57,11 @@ fn main() {
         let out = args.get(2).expect("書き出す先を渡す");
         let aspect = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1.6);
         let max_rows = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(1);
+        let full = args.get(5).map(String::as_str) == Some("future");
         let body = match model::load_state().and_then(|st| {
             let a = st.arch.ok_or("arch が無い")?;
-            layout::layout(&model::view_all(&a, None), aspect, max_rows)
+            let view = if full { model::view_mode(&a, "", None, true) } else { model::view_all(&a, None) };
+            layout::layout(&view, aspect, max_rows)
         }) {
             Ok(lay) => serde_json::to_string(&lay).unwrap(),
             Err(e) => serde_json::json!({ "error": e }).to_string(),
@@ -80,8 +85,17 @@ fn main() {
                 return Err(format!("{scope} の部品が無い"));
             }
             let lay = layout::layout(&view, 1.6, MAX_ROWS)?;
+            // 構想があれば完成図も並べて入れる（書き出した HTML でも「今｜完成図」を切り替えられる）
+            let full = if a.future.is_empty() {
+                None
+            } else {
+                let v = model::view_mode(a, &scope, None, true);
+                let l = layout::layout(&v, 1.6, MAX_ROWS)?;
+                Some((v, l))
+            };
             let path = args.get(3).map(std::path::PathBuf::from).unwrap_or_else(|| export::default_path(&st, &scope, share));
-            export::write(&path, &st, &view, &lay, &scope, &Default::default(), share)?;
+            let full = full.as_ref().map(|(v, l)| (v, l));
+            export::write(&path, &st, (&view, &lay), full, &scope, &Default::default(), share, false)?;
             Ok(path)
         });
         // release では窓のプログラム（windows_subsystem）なので、コンソールには出ない。結果はファイルがあるかで見る
@@ -210,6 +224,7 @@ struct Tab {
     picked: Option<String>,
     view: Option<View>,
     lay: Option<Layout>,
+    stash: Option<(View, Layout)>,
 }
 
 /// 図の上の、押した・乗せた所にあるもの
@@ -223,6 +238,10 @@ struct Viewer {
     state: Option<State>,
     view: Option<View>,
     lay: Option<Layout>,
+    /// 今と完成図のうち、出していない方の中身と並べ方（切り替えるたびに並べ直さない）
+    stash: Option<(View, Layout)>,
+    /// 完成図（構想を薄く足した図）を出しているか。全部のタブで共通（タブごとには覚えない）
+    full: bool,
     msg: String,
     /// 裏で並べている最中の結果の受け口（Graphviz に数百ミリ秒かかるので、窓の糸では待たない）。
     /// 中身（View）と並べ方は必ず組で入れ替える
@@ -295,6 +314,8 @@ impl Viewer {
             state: None,
             view: None,
             lay: None,
+            stash: None,
+            full: std::env::var("ARCH_FUTURE").is_ok_and(|s| s == "1"),
             msg: String::new(),
             pending: None,
             state_mtime: state_mtime(),
@@ -337,7 +358,7 @@ impl Viewer {
             Ok(st) => {
                 match &st.arch {
                     Some(a) => {
-                        v.view = Some(model::view_for(a, &v.scope, None));
+                        v.view = Some(model::view_mode(a, &v.scope, None, v.full));
                         v.msg = "並べている".into();
                     }
                     None => v.msg = "構成図の宣言が無い（~/.herdr/kanban-data/<project>/arch.json）".into(),
@@ -408,6 +429,12 @@ impl Viewer {
             if let Ok((view, r)) = rx.try_recv() {
                 match r {
                     Ok(lay) => {
+                        // 今と完成図を切り替えて並べ直したなら、前の図の並べ方は覚えておく（戻すときに並べ直さない）
+                        if self.view.as_ref().is_some_and(|v| v.full != view.full) {
+                            if let (Some(v), Some(l)) = (self.view.take(), self.lay.take()) {
+                                self.stash = Some((v, l));
+                            }
+                        }
                         (self.view, self.lay) = (Some(view), Some(lay));
                         self.msg.clear();
                         self.moved = false;
@@ -427,9 +454,12 @@ impl Viewer {
         draw::paper(&p, body);
         let keys = ui.input(|i| {
             use egui::Key;
-            [Key::F, Key::Escape, Key::R, Key::S, Key::ArrowRight, Key::ArrowLeft, Key::Space, Key::E].map(|k| i.key_pressed(k))
+            [Key::F, Key::Escape, Key::R, Key::S, Key::ArrowRight, Key::ArrowLeft, Key::Space, Key::E, Key::K].map(|k| i.key_pressed(k))
         });
-        let [f_key, esc, r_key, s_key, right, left, space, e_key] = keys;
+        let [f_key, esc, r_key, s_key, right, left, space, e_key, k_key] = keys;
+        if k_key {
+            self.set_full(!self.full); // k: 今の図と完成図（構想を薄く足した図）を切り替える（f は「全体を収め直す」に使っている）
+        }
         if e_key {
             // e: 今のタブを、ブラウザで操作できる HTML に書き出して開く。Shift+E は共有用
             self.export(ui.input(|i| i.modifiers.shift));
@@ -561,7 +591,9 @@ impl Viewer {
             }
             _ => (0, 0),
         };
-        let head = draw::header(&p, area, &meta, n_drift, n_change);
+        // 構想があるときだけ「今｜完成図」を出す（無ければ上の帯は前のまま）
+        let has_future = self.state.as_ref().and_then(|s| s.arch.as_ref()).is_some_and(|a| !a.future.is_empty());
+        let head = draw::header(&p, area, &meta, n_drift, n_change, (has_future || self.full).then_some(self.full));
         let head_resp = ui.interact(egui::Rect::from_min_size(area.min, egui::vec2(area.width(), draw::HEAD_H)), egui::Id::new("header"), egui::Sense::click());
         let over = head_resp.hover_pos().and_then(|at| head.iter().find(|h| h.0.contains(at)).map(|h| h.1));
         if over.is_some() {
@@ -570,20 +602,60 @@ impl Viewer {
         match (head_resp.clicked(), over) {
             (true, Some(draw::HeadHit::Export)) => self.export(false),
             (true, Some(draw::HeadHit::Share)) => self.export(true),
+            (true, Some(draw::HeadHit::Present)) => self.set_full(false),
+            (true, Some(draw::HeadHit::Full)) => self.set_full(true),
             (true, Some(hit)) => (self.list, self.selected, self.bundle) = (Some(hit), None, None),
             _ => {}
         }
         self.bench_tick(&ctx, body);
     }
 
-    /// 今のタブ（窓で見ている中身と並べ方そのまま）を HTML に書き出し、既定のブラウザで開く。share なら共有用
+    /// 今の図と完成図を切り替える。もう一方の並べ方を覚えていれば並べ直さない（rebuild が入れ替える）
+    fn set_full(&mut self, full: bool) {
+        if self.full == full {
+            return;
+        }
+        self.full = full;
+        self.pending = None; // 並べている途中の結果は前の図のもの
+        self.bundle = None; // まとめた線の番号は図ごとに違う
+        self.rebuild();
+    }
+
+    /// 並べるときの窓の形（幅 / 高さ）
+    fn aspect(&self) -> f64 {
+        (self.size.x / (self.size.y - draw::HEAD_H - draw::TAB_H - draw::STRIP_H)) as f64
+    }
+
+    /// 今のタブ（窓で見ている中身と並べ方そのまま）を HTML に書き出し、既定のブラウザで開く。share なら共有用。
+    /// 構想があれば、出していない方の図（今か完成図）も入れる。覚えている並べ方が無ければここで並べる
     fn export(&mut self, share: bool) {
         let (Some(view), Some(lay), Some(st)) = (&self.view, &self.lay, &self.state) else {
             self.flash = Some(("まだ並べている（並べ終わってから書き出す）".into(), Instant::now()));
             return;
         };
+        let other = match st.arch.as_ref().filter(|a| !a.future.is_empty()) {
+            None => None,
+            Some(a) => {
+                let fresh = model::view_mode(a, &self.scope, self.picked.as_deref(), !view.full);
+                match &self.stash {
+                    Some((v, l)) if v.full == fresh.full && shape(v) == shape(&fresh) => Some((fresh, l.clone())),
+                    _ => match layout::layout(&fresh, self.aspect(), MAX_ROWS) {
+                        Ok(l) => Some((fresh, l)),
+                        Err(e) => {
+                            self.flash = Some((format!("書き出せない: {e}"), Instant::now()));
+                            return;
+                        }
+                    },
+                }
+            }
+        };
+        let other = other.as_ref().map(|(v, l)| (v, l));
+        let ((now, full), start_full) = match other {
+            Some(o) if view.full => ((o, Some((view, lay))), true),
+            o => (((view, lay), o), false),
+        };
         let path = export::default_path(st, &self.scope, share);
-        let msg = match export::write(&path, st, view, lay, &self.scope, &self.working, share) {
+        let msg = match export::write(&path, st, now, full, &self.scope, &self.working, share, start_full) {
             Ok(()) => {
                 self.ctx.open_url(egui::OpenUrl::new_tab(export::file_url(&path)));
                 format!("書き出した: {}", path.display())
@@ -707,7 +779,11 @@ impl Viewer {
             area.show(ui, |ui| {
                 ui.set_width(inner.width() - 12.0);
                 act = match (selected, bundle, list) {
-                    (Some(id), _, _) => view.nodes.iter().find(|n| &n.id == id).and_then(|n| side.node(ui, st, view, n, working.get(&n.id))),
+                    (Some(id), _, _) => match view.nodes.iter().find(|n| &n.id == id) {
+                        Some(n) if n.future => side.future_node(ui, st, view, n),
+                        Some(n) => side.node(ui, st, view, n, working.get(&n.id)),
+                        None => None,
+                    },
                     (None, Some(b), _) if b < lay.bundles.len() => side.bundle(ui, view, lay, b),
                     (None, None, Some(draw::HeadHit::Drift)) => side::list(ui, "図と現物のずれ", &side::drift_lines(st, view)),
                     (None, None, Some(draw::HeadHit::Changes)) => side::list(ui, "前回からの変化", &side::change_lines(st)),
@@ -731,7 +807,7 @@ impl Viewer {
     fn start_layout(&mut self, view: View) {
         let (tx, rx) = mpsc::channel();
         let ctx = self.ctx.clone();
-        let aspect = (self.size.x / (self.size.y - draw::HEAD_H - draw::TAB_H - draw::STRIP_H)) as f64;
+        let aspect = self.aspect();
         std::thread::spawn(move || {
             let lay = layout::layout(&view, aspect, MAX_ROWS);
             let _ = tx.send((view, lay));
@@ -768,10 +844,19 @@ impl Viewer {
     /// 今のタブの中身を、最新の state から作り直す。並べ方が変わっていなければ描き直すだけ
     fn rebuild(&mut self) {
         let Some(a) = self.state.as_ref().and_then(|s| s.arch.as_ref()) else { return };
-        let view = model::view_for(a, &self.scope, self.picked.as_deref());
-        let same = self.pending.is_none() && self.lay.is_some() && self.view.as_ref().is_some_and(|v| shape(v) == shape(&view));
+        let view = model::view_mode(a, &self.scope, self.picked.as_deref(), self.full);
+        let same = self.pending.is_none() && self.lay.is_some() && self.view.as_ref().is_some_and(|v| v.full == view.full && shape(v) == shape(&view));
+        let stashed = self.stash.as_ref().is_some_and(|(v, _)| v.full == view.full && shape(v) == shape(&view));
         if same {
             self.view = Some(view);
+            self.forget_missing();
+        } else if stashed {
+            // 今と完成図を切り替えた: もう一方の並べ方を覚えていたので、並べ直さずに入れ替える
+            let (_, lay) = self.stash.take().unwrap();
+            if let (Some(v), Some(l)) = (self.view.take(), self.lay.take()) {
+                self.stash = Some((v, l));
+            }
+            (self.view, self.lay, self.pending, self.moved) = (Some(view), Some(lay), None, false);
             self.forget_missing();
         } else if self.zoomed {
             self.start_layout(view);
@@ -792,6 +877,7 @@ impl Viewer {
             picked: self.picked.take(),
             view: self.view.take(),
             lay: self.lay.take(),
+            stash: self.stash.take(),
         };
     }
 
@@ -801,7 +887,7 @@ impl Viewer {
         let t = std::mem::take(&mut self.tabs[i]);
         self.tabs[i].scope = t.scope.clone();
         (self.scope, self.cam, self.moved, self.selected, self.bundle) = (t.scope, t.cam, t.moved, t.selected, t.bundle);
-        (self.flow, self.picked, self.view, self.lay) = (t.flow, t.picked, t.view, t.lay);
+        (self.flow, self.picked, self.view, self.lay, self.stash) = (t.flow, t.picked, t.view, t.lay, t.stash);
         (self.hover_node, self.hover_edge, self.playing, self.pending) = (None, None, None, None);
         self.rebuild(); // 中身は最新の state で
     }
@@ -984,6 +1070,7 @@ mod tests {
             edges: vec![Edge { from: "a".into(), to: "b".into(), status: "live".into(), ..Default::default() }],
             owner: None,
             owners: vec![],
+            full: false,
         };
         let lay = Layout {
             pos: [("a".to_string(), (100.0, 100.0)), ("b".to_string(), (500.0, 100.0))].into_iter().collect(),
@@ -1053,6 +1140,30 @@ mod tests {
         }
         assert_eq!(v.selected.as_deref(), Some("c")); // 作りかけの 3 番で止まる
         assert!(v.playing.is_none());
+    }
+
+    #[test]
+    fn 完成図に切り替えても骨格は今の部品だけをたどり_戻すと構想は消える() {
+        let mut v = flow_viewer();
+        let node = |id: &str, step: u32, status: &str| {
+            serde_json::json!({ "id": id, "zone": "z", "title": id, "status": status, "blocked": "", "steps": { "p": step } })
+        };
+        let state = serde_json::json!({
+            "arch": { "zones": [{ "id": "z" }], "nodes": [node("a", 1, "live"), node("b", 2, "wip")], "edges": [],
+                      "future": { "nodes": [{ "id": "later", "zone": "z", "title": "あとで", "future": true }] } }
+        });
+        v.state = Some(serde_json::from_value(state).unwrap());
+        v.rebuild();
+        assert_eq!(v.view.as_ref().unwrap().nodes.len(), 2);
+        v.set_full(true);
+        let view = v.view.as_ref().unwrap();
+        assert!(view.full && view.nodes.iter().any(|n| n.id == "later"));
+        assert_eq!(v.flow_go(1).as_deref(), Some("a"));
+        assert_eq!(v.flow_go(1).as_deref(), Some("b"));
+        assert_eq!(v.flow_go(1).as_deref(), Some("b")); // 構想へは進まない
+        v.selected = Some("later".into());
+        v.set_full(false);
+        assert!(!v.view.as_ref().unwrap().nodes.iter().any(|n| n.id == "later"));
     }
 }
 

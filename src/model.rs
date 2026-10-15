@@ -12,6 +12,13 @@ pub struct Zone {
     pub sub: String,
     pub kind: String,
     pub project: String,
+    /// 構想（完成図）だけの枠
+    #[serde(skip_serializing_if = "is_false")]
+    pub future: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 #[derive(Deserialize, Serialize, Clone, Default)]
@@ -84,6 +91,19 @@ pub struct Node {
     pub docs: Vec<String>,
     /// 本番のスイッチ（Vercel の環境変数の名前）を確かめた結果
     pub switch_note: String,
+    /// 構想（完成図だけに出す。作るかは未定）。状態・骨格・待ちを持たない
+    #[serde(skip_serializing_if = "is_false")]
+    pub future: bool,
+    /// 構想の出所（"<パス>#<目印>"）と、宣言に書いたメモ
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub source: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub note: String,
+    /// 構想の知らせ（出所が main に無い・変わった / 段かカードになった）。ずれには数えない
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub source_note: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub promote: String,
     /// 今出している骨格の番号（view を作るときに steps から入れる）
     #[serde(skip)]
     pub step: Option<u32>,
@@ -101,6 +121,9 @@ pub struct Edge {
     pub project: String,
     /// コードで確かめた結果（check のある線だけ）
     pub note: String,
+    /// 構想の線（完成図だけに出す）
+    #[serde(skip_serializing_if = "is_false")]
+    pub future: bool,
 }
 
 #[derive(Deserialize, Serialize, Clone, Default)]
@@ -182,6 +205,25 @@ pub struct Arch {
     pub drift: HashMap<String, Drift>,
     /// プロジェクトごとのリポジトリの場所（開いたときの範囲を、herdr のペインのフォルダから決める）
     pub repos: HashMap<String, String>,
+    /// 構想（arch-future.json）。完成図のときだけ図に足す
+    pub future: Future,
+}
+
+/// 構想（完成図）。arch.py の future が決める。今の図の判断には入らない
+#[derive(Deserialize, Serialize, Clone, Default)]
+#[serde(default)]
+pub struct Future {
+    pub zones: Vec<Zone>,
+    pub nodes: Vec<Node>,
+    pub edges: Vec<Edge>,
+    /// 落とした宣言の知らせ（分からない枠・部品）
+    pub notes: Vec<String>,
+}
+
+impl Future {
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty() && self.edges.is_empty()
+    }
 }
 
 #[derive(Deserialize, Serialize, Clone, Default)]
@@ -267,6 +309,8 @@ pub struct View {
     pub owner: Option<String>,
     /// 骨格を持っているプロジェクト（全体では、帯の名前を押して切り替える）
     pub owners: Vec<String>,
+    /// 完成図（構想を足した図）か
+    pub full: bool,
 }
 
 /// 全体の view（--dump-layout と、Python との突き合わせで使う）
@@ -325,7 +369,36 @@ pub fn view_for(a: &Arch, scope: &str, picked: Option<&str>) -> View {
         .map(|n| Node { step: owner.as_ref().and_then(|o| n.steps.get(o).copied()), ..n.clone() })
         .collect();
     let edges = a.edges.iter().filter(|e| keep.contains(&e.from) && keep.contains(&e.to)).cloned().collect();
-    View { zones: a.zones.clone(), nodes, edges, owner, owners }
+    View { zones: a.zones.clone(), nodes, edges, owner, owners, full: false }
+}
+
+/// 今か完成図かで view を作る。full でなければ view_for と同じ（構想は読まない）。
+/// full なら、今の view の後ろに構想を足す（並びは 今の枠・部品・線 → 構想の枠・部品・線。書き出しはこの並びを前提にする）。
+/// 範囲がプロジェクトなら、そのプロジェクトの構想と、範囲の部品に線 1 本でつながる構想を足す。
+/// 今の部品は足さない（ずれ・変化・骨格の数を今の図とそろえる）。両端が図に無い線は出さない
+pub fn view_mode(a: &Arch, scope: &str, picked: Option<&str>, full: bool) -> View {
+    let mut v = view_for(a, scope, picked);
+    v.full = full;
+    if !full || a.future.is_empty() {
+        return v;
+    }
+    let f = &a.future;
+    let zones: std::collections::HashSet<&str> = a.zones.iter().chain(&f.zones).map(|z| z.id.as_str()).collect();
+    let mut keep: std::collections::HashSet<String> = v.nodes.iter().map(|n| n.id.clone()).collect();
+    let own: std::collections::HashSet<&str> =
+        f.nodes.iter().filter(|n| scope.is_empty() || n.project == scope).map(|n| n.id.as_str()).collect();
+    let touches = |id: &str, other: &dyn Fn(&str) -> bool| f.edges.iter().any(|e| (e.from == id && other(&e.to)) || (e.to == id && other(&e.from)));
+    let futures: Vec<&Node> = f
+        .nodes
+        .iter()
+        .filter(|n| zones.contains(n.zone.as_str()))
+        .filter(|n| own.contains(n.id.as_str()) || touches(&n.id, &|x| keep.contains(x) || own.contains(x)))
+        .collect();
+    keep.extend(futures.iter().map(|n| n.id.clone()));
+    v.nodes.extend(futures.into_iter().map(|n| Node { future: true, step: None, ..n.clone() }));
+    v.edges.extend(f.edges.iter().filter(|e| keep.contains(&e.from) && keep.contains(&e.to)).map(|e| Edge { future: true, ..e.clone() }));
+    v.zones.extend(f.zones.iter().map(|z| Zone { future: true, ..z.clone() }));
+    v
 }
 
 /// ブランチ名とカードの id を比べるための形（feat/・fix/ などの前置きと記号を落とす）
@@ -525,6 +598,77 @@ mod tests {
         got.sort();
         assert_eq!(got, ["api:admin", "api:stock", "shop:cart", "shop:mail"]);
         assert_eq!(scope_ids(&a, "").len(), 6);
+    }
+
+    /// 今の部品 2 つ（shop・api）と、構想 2 つ（shop の構想だけの枠に 1 つ・api の今の枠に 1 つ）
+    fn future_arch() -> Arch {
+        let state = serde_json::json!({ "arch": {
+            "zones": [{ "id": "shop:z" }, { "id": "api:z" }],
+            "nodes": [{ "id": "shop:cart", "project": "shop", "zone": "shop:z", "steps": { "shop": 1 } }, { "id": "api:stock", "project": "api", "zone": "api:z" }],
+            "edges": [],
+            "future": {
+                "zones": [{ "id": "shop:later", "title": "あとで", "future": true }],
+                "nodes": [
+                    { "id": "shop:points", "project": "shop", "zone": "shop:later", "title": "ポイント", "status": "future", "future": true,
+                      "source": "docs/構想.md#ポイント", "source_note": "出所が変わった（見直す）", "promote": "" },
+                    { "id": "api:bulk", "project": "api", "zone": "api:z", "future": true }
+                ],
+                "edges": [{ "from": "shop:points", "to": "api:stock", "future": true, "status": "future" }],
+                "notes": ["線 a → b: b が見つからない（落とした）"]
+            }
+        }});
+        serde_json::from_value::<State>(state).unwrap().arch.unwrap()
+    }
+
+    #[test]
+    fn 構想を読む() {
+        let a = future_arch();
+        assert_eq!(a.future.nodes[0].source, "docs/構想.md#ポイント");
+        assert_eq!(a.future.nodes[0].source_note, "出所が変わった（見直す）");
+        assert!(a.future.nodes[0].future && a.future.zones[0].future && a.future.edges[0].future);
+        assert_eq!(a.future.notes.len(), 1);
+        let none: State = serde_json::from_value(serde_json::json!({ "arch": { "nodes": [] } })).unwrap();
+        assert!(none.arch.unwrap().future.is_empty()); // 構想の無い state も読める
+    }
+
+    #[test]
+    fn 構想は完成図のときだけ図に入る() {
+        let a = future_arch();
+        let now = view_mode(&a, "", None, false);
+        assert_eq!(now.nodes.len(), 2);
+        assert!(now.edges.is_empty() && now.zones.len() == 2);
+        let full = view_mode(&a, "", None, true);
+        let ids: Vec<&str> = full.nodes.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(ids, ["shop:cart", "api:stock", "shop:points", "api:bulk"]); // 今の部品が先、構想は後ろ
+        assert_eq!(full.edges.len(), 1);
+        assert_eq!(full.zones.len(), 3);
+        assert!(full.nodes[2].future && full.nodes[2].step.is_none());
+        assert_eq!(full.nodes[0].step, Some(1)); // 今の部品の骨格はそのまま
+        assert_eq!(bones(&full.nodes).len(), 1); // 構想は骨格に入らない
+    }
+
+    #[test]
+    fn 範囲では_そのプロジェクトの構想と_範囲につながる構想を足す() {
+        let a = future_arch();
+        let shop = view_mode(&a, "shop", None, true);
+        let mut ids: Vec<&str> = shop.nodes.iter().map(|n| n.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, ["shop:cart", "shop:points"]); // 範囲の外の今の部品（api:stock）は足さないので、その線も出さない
+        assert!(shop.edges.is_empty());
+        let api = view_mode(&a, "api", None, true);
+        let mut ids: Vec<&str> = api.nodes.iter().map(|n| n.id.as_str()).collect();
+        ids.sort();
+        assert_eq!(ids, ["api:bulk", "api:stock", "shop:points"]); // 範囲の部品に線 1 本でつながる構想
+    }
+
+    #[test]
+    fn 構想の欄は空なら書き出さない() {
+        let v = serde_json::to_value(Node { id: "a".into(), ..Default::default() }).unwrap();
+        for k in ["future", "source", "note", "source_note", "promote"] {
+            assert!(v.get(k).is_none(), "{k} が出ている");
+        }
+        assert!(serde_json::to_value(Edge::default()).unwrap().get("future").is_none());
+        assert!(serde_json::to_value(Zone::default()).unwrap().get("future").is_none());
     }
 
     #[test]
