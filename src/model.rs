@@ -99,7 +99,7 @@ pub struct Node {
     pub source: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub note: String,
-    /// 構想の知らせ（出所が main に無い・変わった / 段かカードになった）。ずれには数えない
+    /// 構想の知らせ（出所が main に無い・変わった / 作り始めた）。ずれには数えない
     #[serde(skip_serializing_if = "String::is_empty")]
     pub source_note: String,
     #[serde(skip_serializing_if = "String::is_empty")]
