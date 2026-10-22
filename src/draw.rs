@@ -719,35 +719,30 @@ pub fn strip(p: &Painter, r: Rect, view: &View, selected: Option<&str>) -> Vec<(
 }
 
 /// タブの帯で押せるもの
-#[derive(Clone, Copy)]
-pub enum TabHit {
-    Switch(usize),
-    Close(usize),
-}
-
-/// タブの帯。今のタブは白く浮かせ、ほかは紙の色に沈める。2 枚以上あれば × で閉じられる
-pub fn tabbar(p: &Painter, r: Rect, scopes: &[String], cur: usize) -> Vec<(Rect, TabHit)> {
+/// タブの帯。今のタブは白く浮かせ、ほかは紙の色に沈める。タブは全部決まったもので、閉じない。
+/// プロジェクトに色があれば（kanban.json の "color"）、名前の前に枠と同じ色の小さな四角。返すのは押せる所とタブの番号
+pub fn tabbar(p: &Painter, r: Rect, scopes: &[String], colors: &[Option<String>], cur: usize) -> Vec<(Rect, usize)> {
     p.rect_filled(r, 0.0, BG);
     let (f, fb) = (font(9.0, false), font(9.0, true));
-    let closable = scopes.len() > 1;
     let mut hits = vec![];
     let mut x = r.min.x + 12.0;
     for (i, scope) in scopes.iter().enumerate() {
         let label = if scope.is_empty() { "全体" } else { scope.as_str() };
         let on = i == cur;
-        let w = measure(p, label, if on { &fb } else { &f }) + if closable { 40.0 } else { 24.0 };
+        let mark = colors.get(i).and_then(|c| project_mark(c.as_deref()?));
+        let pad = if mark.is_some() { 14.0 } else { 0.0 };
+        let w = measure(p, label, if on { &fb } else { &f }) + 24.0 + pad;
         let tab = Rect::from_min_max(pos2(x, r.min.y + 6.0), pos2(x + w, r.max.y));
         if on {
             p.rect(tab, 0.0, PANEL, Stroke::new(1.0_f32, LINE), StrokeKind::Inside);
             p.line_segment([pos2(tab.min.x + 1.0, tab.max.y - 0.5), pos2(tab.max.x - 1.0, tab.max.y - 0.5)], Stroke::new(1.0_f32, PANEL)); // 下の辺は消して、下の図とつながって見えるように
         }
-        p.text(pos2(x + 12.0, tab.center().y), Align2::LEFT_CENTER, label, if on { fb.clone() } else { f.clone() }, if on { TEXT } else { DIM });
-        hits.push((tab, TabHit::Switch(i)));
-        if closable {
-            let c = pos2(x + w - 14.0, tab.center().y);
-            p.text(c, Align2::CENTER_CENTER, "×", font(10.0, false), FAINT);
-            hits.push((Rect::from_center_size(c, vec2(18.0, 18.0)), TabHit::Close(i)));
+        if let Some(m) = mark {
+            let sq = Rect::from_center_size(pos2(x + 16.0, tab.center().y), vec2(8.0, 8.0));
+            p.rect(sq, 1.0, m, Stroke::new(1.0_f32, LINE), StrokeKind::Inside);
         }
+        p.text(pos2(x + 12.0 + pad, tab.center().y), Align2::LEFT_CENTER, label, if on { fb.clone() } else { f.clone() }, if on { TEXT } else { DIM });
+        hits.push((tab, i));
         x += w + 4.0;
     }
     hits

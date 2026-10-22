@@ -238,6 +238,8 @@ pub struct Project {
     pub github: String,
     /// 画面でのプロジェクトの色（kanban.json の "color"。カンバンの画面と同じ色の名前）
     pub color: Option<String>,
+    /// タブの並び（kanban.json の "order"。小さいほど左。無ければ名前の順で後ろ）
+    pub order: Option<i64>,
     pub plan: Option<Plan>,
     /// 番号（文字）ごとの PR
     pub prs: HashMap<String, Pr>,
@@ -268,6 +270,15 @@ pub struct State {
     pub arch: Option<Arch>,
     pub projects: HashMap<String, Project>,
     pub cards: Vec<Card>,
+}
+
+/// 窓に出すタブの範囲。左から全体（空）、構成図に部品があるプロジェクトを order の順（無ければ名前の順で後ろ）
+pub fn tab_scopes(st: &State) -> Vec<String> {
+    let mut names: Vec<&str> = st.arch.as_ref().map_or(vec![], |a| a.nodes.iter().map(|n| n.project.as_str()).filter(|p| !p.is_empty()).collect());
+    names.sort();
+    names.dedup();
+    names.sort_by_key(|n| st.projects.get(*n).and_then(|p| p.order).unwrap_or(i64::MAX));
+    std::iter::once(String::new()).chain(names.into_iter().map(String::from)).collect()
 }
 
 /// 読む state。環境変数 ARCH_STATE で差し替えられる（写しを書き換えて、追いつくかを確かめるため）

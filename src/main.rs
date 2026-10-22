@@ -2,7 +2,8 @@
 //!
 //!   andon                         窓を開く（範囲は herdr で今選んでいるペインのプロジェクト。リポジトリでなければ全体）
 //!   andon <project>|all           その範囲のタブで開く
-//! すでに開いていれば、開いている窓に「その範囲（渡された範囲か、今選んでいるペインのプロジェクト）のタブを足して前に出て」と
+//! タブは最初から全体と、構成図にあるプロジェクト全部（kanban.json の "order" の順）。閉じない。
+//! すでに開いていれば、開いている窓に「その範囲（渡された範囲か、今選んでいるペインのプロジェクト）のタブに切り替えて前に出て」と
 //! 知らせて終わる（窓は増やさない）。
 //!   andon --dump-layout <out> [aspect] [段の上限] [future]   並べた結果を JSON で書く（段の上限 1 なら Python の layout と
 //!                                                    同じ答え。future を付けると完成図）
@@ -364,6 +365,7 @@ impl Viewer {
                     None => v.msg = "構成図の宣言が無い（~/.herdr/kanban-data/<project>/arch.json）".into(),
                 }
                 v.state = Some(st);
+                v.sync_tabs();
             }
             Err(e) => v.msg = format!("読めない: {e}"),
         }
@@ -406,7 +408,7 @@ impl Viewer {
         let msgs: Vec<win::Msg> = self.inbox.as_ref().map(|rx| rx.try_iter().collect()).unwrap_or_default();
         for m in msgs {
             if let win::Msg::Open(scope) = m {
-                self.open_tab(scope); // 2 回目に押されたら: そのプロジェクトのタブを足す（あれば切り替える）
+                self.open_tab(scope); // 2 回目に押されたら: そのプロジェクトのタブに切り替える
             }
             self.front_at = Some(Instant::now());
         }
@@ -418,12 +420,9 @@ impl Viewer {
                 ctx.request_repaint_after(at - Instant::now());
             }
         }
-        let (next_tab, close_tab) = ui.input_mut(|i| (i.consume_key(egui::Modifiers::CTRL, egui::Key::Tab), i.consume_key(egui::Modifiers::CTRL, egui::Key::W)));
-        if next_tab {
+        // タブは全部決まったもの（閉じない）。Ctrl+Tab で次へ
+        if ui.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Tab)) {
             self.switch((self.cur + 1) % self.tabs.len());
-        }
-        if close_tab {
-            self.close_tab(self.cur);
         }
         if let Some(rx) = &self.pending {
             if let Ok((view, r)) = rx.try_recv() {
@@ -833,6 +832,7 @@ impl Viewer {
         match model::load_state() {
             Ok(st) => {
                 self.state = Some(st);
+                self.sync_tabs();
                 self.rebuild();
                 if self.msg.starts_with("読めない") {
                     self.msg.clear();
@@ -902,7 +902,8 @@ impl Viewer {
         self.load(i);
     }
 
-    /// その範囲のタブへ切り替える。無ければ足す（prefix+o を押すたびに、今のプロジェクトをタブとして残せる）
+    /// その範囲のタブへ切り替える（prefix+o）。タブは全部のプロジェクトぶん最初からあるので、
+    /// 足すのは構成図にまだ部品が無いプロジェクトのときだけ
     fn open_tab(&mut self, scope: String) {
         if let Some(i) = self.tabs.iter().enumerate().position(|(i, t)| (if i == self.cur { &self.scope } else { &t.scope }) == &scope) {
             return self.switch(i);
@@ -912,26 +913,35 @@ impl Viewer {
         self.load(self.tabs.len() - 1);
     }
 
-    /// タブを閉じる。最後の 1 枚は閉じない。今のタブを閉じたら、となりのタブへ
-    fn close_tab(&mut self, i: usize) {
-        if self.tabs.len() == 1 || i >= self.tabs.len() {
+    /// タブを、全体 ＋ 構成図にあるプロジェクト全部にそろえる（開いたときと、state を読み直したとき）。
+    /// 並びは tab_scopes の順。今あるタブは見ていた場所ごと残し、プロジェクトが増えたら足す。
+    /// state に無い範囲のタブ（prefix+o で開いたもの）は後ろに残す。今のタブは替えない
+    fn sync_tabs(&mut self) {
+        let Some(st) = &self.state else { return };
+        let want = model::tab_scopes(st);
+        let have: Vec<String> = self.tabs.iter().enumerate().map(|(i, t)| if i == self.cur { self.scope.clone() } else { t.scope.clone() }).collect();
+        let mut order: Vec<String> = want.clone();
+        order.extend(have.iter().filter(|h| !want.contains(h)).cloned());
+        if order == have {
             return;
         }
-        if i == self.cur {
-            self.tabs.remove(i);
-            self.load(i.min(self.tabs.len() - 1));
-        } else {
-            self.tabs.remove(i);
-            if i < self.cur {
-                self.cur -= 1;
-            }
-        }
+        let mut old: Vec<Option<Tab>> = std::mem::take(&mut self.tabs).into_iter().map(Some).collect();
+        self.tabs = order
+            .iter()
+            .map(|sc| match have.iter().position(|h| h == sc) {
+                Some(k) => old[k].take().unwrap(),
+                None => Tab { scope: sc.clone(), ..Default::default() },
+            })
+            .collect();
+        self.cur = order.iter().position(|sc| sc == &self.scope).unwrap();
     }
 
     /// タブの帯を描き、押されたら切り替える・閉じる
     fn tabbar(&mut self, ui: &mut egui::Ui, p: &egui::Painter, r: egui::Rect) {
         let names: Vec<String> = self.tabs.iter().enumerate().map(|(i, t)| if i == self.cur { self.scope.clone() } else { t.scope.clone() }).collect();
-        let hits = draw::tabbar(p, r, &names, self.cur);
+        let colors: Vec<Option<String>> =
+            names.iter().map(|n| self.state.as_ref().and_then(|st| st.projects.get(n)).and_then(|p| p.color.clone())).collect();
+        let hits = draw::tabbar(p, r, &names, &colors, self.cur);
         let resp = ui.interact(r, egui::Id::new("tabbar"), egui::Sense::click());
         let over = resp.hover_pos().and_then(|at| hits.iter().rev().find(|h| h.0.contains(at)).map(|h| h.1));
         if over.is_some() {
@@ -939,8 +949,7 @@ impl Viewer {
         }
         if resp.clicked() {
             match over {
-                Some(draw::TabHit::Switch(i)) => self.switch(i),
-                Some(draw::TabHit::Close(i)) => self.close_tab(i),
+                Some(i) => self.switch(i),
                 None => {}
             }
         }
@@ -1113,6 +1122,7 @@ mod tests {
             "arch": { "zones": [{ "id": "z" }], "nodes": [node("c", 3, "wip"), node("a", 1, "live"), node("b", 2, "live")], "edges": [] }
         });
         std::fs::write(&path, state.to_string()).unwrap();
+        let _one = ENV.lock().unwrap();
         unsafe { std::env::set_var("ARCH_STATE", &path) };
         Viewer::new(egui::Context::default(), String::new(), None)
     }
@@ -1166,6 +1176,45 @@ mod tests {
         v.selected = Some("later".into());
         v.set_full(false);
         assert!(!v.view.as_ref().unwrap().nodes.iter().any(|n| n.id == "later"));
+    }
+
+    /// ARCH_STATE を書き換えて読むまでを 1 本ずつ（テストは並べて走るので、読む前にほかのテストに書き換えられないように）
+    static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// プロジェクト 3 つ（b は order 1・a は order 2・c は order なし）の state を読む窓。開いたときの範囲は c
+    fn tabs_viewer(dir: &str) -> Viewer {
+        let dir = std::env::temp_dir().join(dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.json");
+        let node = |id: &str, project: &str| serde_json::json!({ "id": id, "zone": "z", "project": project, "title": id, "status": "live" });
+        let state = serde_json::json!({
+            "generated_at": "2026-10-23T00:00:00",
+            "projects": { "a": { "github": "", "order": 2 }, "b": { "github": "", "order": 1, "color": "green3" }, "c": { "github": "" } },
+            "arch": { "zones": [{ "id": "z" }], "nodes": [node("x", "a"), node("y", "b"), node("w", "c")], "edges": [] }
+        });
+        std::fs::write(&path, state.to_string()).unwrap();
+        let _one = ENV.lock().unwrap();
+        unsafe { std::env::set_var("ARCH_STATE", &path) };
+        Viewer::new(egui::Context::default(), "c".into(), None)
+    }
+
+    fn scopes(v: &Viewer) -> Vec<String> {
+        v.tabs.iter().enumerate().map(|(i, t)| if i == v.cur { v.scope.clone() } else { t.scope.clone() }).collect()
+    }
+
+    #[test]
+    fn タブは最初から全体と全部のプロジェクトで_開いた範囲を選ぶ() {
+        let mut v = tabs_viewer("andon-test-tabs");
+        assert_eq!(scopes(&v), ["", "b", "a", "c"]);
+        assert_eq!(v.scope, "c");
+        // prefix+o はタブを増やさず切り替えるだけ
+        v.open_tab("b".into());
+        assert_eq!((scopes(&v).len(), v.scope.as_str()), (4, "b"));
+        // state に無い範囲は後ろに足し、読み直しても消さない
+        v.open_tab("later".into());
+        v.sync_tabs();
+        assert_eq!(scopes(&v), ["", "b", "a", "c", "later"]);
+        assert_eq!(v.scope, "later");
     }
 }
 
