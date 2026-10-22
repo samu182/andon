@@ -254,6 +254,35 @@ pub struct Card {
     pub prs: Vec<u64>,
     /// PR がまだ無いあいだ、このカードの作業をしているブランチ（plan カードの id はブランチ名とそろわないため）
     pub branches: Vec<String>,
+    /// plan（計画書の項目）・fix（修正）・work（作業カード）
+    pub kind: String,
+    pub title: String,
+    pub critical: bool,
+    /// やること・自分の番・外部待ち（board.py が決める）
+    pub column: String,
+    /// 待っているもの・「N 日動きなし」
+    pub why: Vec<String>,
+    /// やることの済んだ数（「3/8」。無ければ空）
+    pub progress: String,
+    pub order: i64,
+    pub items: Vec<Item>,
+}
+
+/// カンバンの列の順
+pub const COLUMNS: [&str; 3] = ["やること", "自分の番", "外部待ち"];
+
+/// その列のカード（範囲が空なら全部のプロジェクト）。プロジェクトのタブの並び → カードの order の順
+pub fn column_cards<'a>(st: &'a State, scope: &str, column: &str) -> Vec<&'a Card> {
+    let rank = |p: &str| st.projects.get(p).and_then(|x| x.order).unwrap_or(i64::MAX);
+    let mut out: Vec<&Card> = st.cards.iter().filter(|c| c.column == column && (scope.is_empty() || c.project == scope)).collect();
+    out.sort_by(|a, b| (rank(&a.project), &a.project, a.order).cmp(&(rank(&b.project), &b.project, b.order)));
+    out
+}
+
+/// カードの部品（plan に "<project>:<カードの id>" がある部品）。無ければ None
+pub fn card_node<'a>(view: &'a View, c: &Card) -> Option<&'a Node> {
+    let key = format!("{}:{}", c.project, c.id);
+    view.nodes.iter().find(|n| !n.future && n.plan.contains(&key))
 }
 
 /// 作業中の部品: どのブランチで、今選んでいるペインか
@@ -697,5 +726,32 @@ mod tests {
         let mut got: Vec<String> = scope_ids(&a, "api").into_iter().collect();
         got.sort();
         assert_eq!(got, ["api:stock", "x:relay"]);
+    }
+
+    #[test]
+    fn カンバンの列は範囲で絞り_タブの並びとカードの順に並べ_部品は計画書の項目でたどる() {
+        let st: State = serde_json::from_value(serde_json::json!({
+            "projects": { "a": { "github": "", "order": 2 }, "b": { "github": "", "order": 1 } },
+            "cards": [
+                { "project": "a", "id": "C-2", "column": "やること", "order": 2 },
+                { "project": "a", "id": "C-1", "column": "やること", "order": 1 },
+                { "project": "b", "id": "fix-x", "column": "やること", "order": 9 },
+                { "project": "a", "id": "C-3", "column": "外部待ち", "order": 3 }
+            ],
+            "arch": { "zones": [{ "id": "z" }], "nodes": [
+                { "id": "a:n", "zone": "z", "project": "a", "plan": ["a:C-1"] },
+                { "id": "a:f", "zone": "z", "project": "a", "plan": ["a:C-2"], "future": true }
+            ], "edges": [] }
+        }))
+        .unwrap();
+        let ids = |scope: &str, col: &str| column_cards(&st, scope, col).iter().map(|c| c.id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids("", "やること"), ["fix-x", "C-1", "C-2"]); // b（order 1）が先
+        assert_eq!(ids("a", "やること"), ["C-1", "C-2"]);
+        assert_eq!(ids("a", "自分の番"), Vec::<String>::new());
+        let view = view_for(st.arch.as_ref().unwrap(), "", None);
+        let card = |id: &str| st.cards.iter().find(|c| c.id == id).unwrap();
+        assert_eq!(card_node(&view, card("C-1")).map(|n| n.id.as_str()), Some("a:n"));
+        assert!(card_node(&view, card("C-2")).is_none()); // 構想の部品へは飛ばない
+        assert!(card_node(&view, card("fix-x")).is_none());
     }
 }

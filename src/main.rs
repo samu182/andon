@@ -17,12 +17,14 @@
 //! 環境変数 ARCH_SELECT=<部品の id> を付けると、その部品を選んだ状態で開く（右の欄を撮って確かめるため）。
 //! ARCH_SELECT=list:drift / list:changes なら、図と現物のずれ・前回からの変化の一覧を出して開く。
 //! 環境変数 ARCH_FUTURE=1 を付けると、完成図（構想を薄く足した図）で開く。窓の中では上の帯の「今｜完成図」か k キー。
+//! 環境変数 ARCH_BOARD=1 を付けると、カンバンを出した状態で開く（b で図と切り替え）。
 //! 環境変数 ARCH_PORT=<番号> を付けると、2 つ目を開かないための口の番号を替える（開いている窓に触らずに確かめるため）。
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod draw;
 mod export;
+mod kanban;
 mod layout;
 mod model;
 mod side;
@@ -243,6 +245,9 @@ struct Viewer {
     stash: Option<(View, Layout)>,
     /// 完成図（構想を薄く足した図）を出しているか。全部のタブで共通（タブごとには覚えない）
     full: bool,
+    /// 図の代わりにカンバンを出しているか（b・上の帯の「図｜カンバン」）。全部のタブで共通
+    board_mode: bool,
+    board: kanban::Board,
     msg: String,
     /// 裏で並べている最中の結果の受け口（Graphviz に数百ミリ秒かかるので、窓の糸では待たない）。
     /// 中身（View）と並べ方は必ず組で入れ替える
@@ -317,6 +322,8 @@ impl Viewer {
             lay: None,
             stash: None,
             full: std::env::var("ARCH_FUTURE").is_ok_and(|s| s == "1"),
+            board_mode: std::env::var("ARCH_BOARD").is_ok_and(|s| s == "1"),
+            board: Default::default(),
             msg: String::new(),
             pending: None,
             state_mtime: state_mtime(),
@@ -453,9 +460,12 @@ impl Viewer {
         draw::paper(&p, body);
         let keys = ui.input(|i| {
             use egui::Key;
-            [Key::F, Key::Escape, Key::R, Key::S, Key::ArrowRight, Key::ArrowLeft, Key::Space, Key::E, Key::K].map(|k| i.key_pressed(k))
+            [Key::F, Key::Escape, Key::R, Key::S, Key::ArrowRight, Key::ArrowLeft, Key::Space, Key::E, Key::K, Key::B].map(|k| i.key_pressed(k))
         });
-        let [f_key, esc, r_key, s_key, right, left, space, e_key, k_key] = keys;
+        let [f_key, esc, r_key, s_key, right, left, space, e_key, k_key, b_key] = keys;
+        if b_key {
+            self.board_mode = !self.board_mode; // b: 図とカンバンを切り替える
+        }
         if k_key {
             self.set_full(!self.full); // k: 今の図と完成図（構想を薄く足した図）を切り替える（f は「全体を収め直す」に使っている）
         }
@@ -488,12 +498,15 @@ impl Viewer {
         if self.selected.is_some() || self.bundle.is_some() {
             self.list = None; // 部品やまとめた線を選んだら、一覧はたたむ
         }
-        let side_open = self.selected.is_some() || self.bundle.is_some() || self.list.is_some();
+        let side_open = !self.board_mode && (self.selected.is_some() || self.bundle.is_some() || self.list.is_some());
         // 右の欄は図の上に重ねる（出し入れで図の倍率を変えない。選ぶたびに図が縮むと見失う）
         let canvas = if side_open { egui::Rect::from_min_max(body.min, egui::pos2(body.max.x - side::WIDTH, body.max.y)) } else { body };
         self.canvas = canvas;
-        let resp = ui.interact(canvas, egui::Id::new("canvas"), egui::Sense::click_and_drag());
-        if let (Some(view), Some(lay), Some(st)) = (&self.view, &self.lay, &self.state) {
+        if self.board_mode {
+            self.kanban(ui, body);
+        }
+        let resp = ui.interact(if self.board_mode { egui::Rect::NOTHING } else { canvas }, egui::Id::new("canvas"), egui::Sense::click_and_drag());
+        if let (false, Some(view), Some(lay), Some(st)) = (self.board_mode, &self.view, &self.lay, &self.state) {
             if !self.moved || self.cam.is_none() {
                 self.cam = Some(draw::Camera::fit(body, lay));
             }
@@ -592,7 +605,8 @@ impl Viewer {
         };
         // 構想があるときだけ「今｜完成図」を出す（無ければ上の帯は前のまま）
         let has_future = self.state.as_ref().and_then(|s| s.arch.as_ref()).is_some_and(|a| !a.future.is_empty());
-        let head = draw::header(&p, area, &meta, n_drift, n_change, (has_future || self.full).then_some(self.full));
+        let mode = (!self.board_mode && (has_future || self.full)).then_some(self.full);
+        let head = draw::header(&p, area, &meta, n_drift, n_change, mode, self.board_mode);
         let head_resp = ui.interact(egui::Rect::from_min_size(area.min, egui::vec2(area.width(), draw::HEAD_H)), egui::Id::new("header"), egui::Sense::click());
         let over = head_resp.hover_pos().and_then(|at| head.iter().find(|h| h.0.contains(at)).map(|h| h.1));
         if over.is_some() {
@@ -603,6 +617,8 @@ impl Viewer {
             (true, Some(draw::HeadHit::Share)) => self.export(true),
             (true, Some(draw::HeadHit::Present)) => self.set_full(false),
             (true, Some(draw::HeadHit::Full)) => self.set_full(true),
+            (true, Some(draw::HeadHit::Map)) => self.board_mode = false,
+            (true, Some(draw::HeadHit::Board)) => self.board_mode = true,
             (true, Some(hit)) => (self.list, self.selected, self.bundle) = (Some(hit), None, None),
             _ => {}
         }
@@ -757,6 +773,20 @@ impl Viewer {
     }
 
     /// 右の欄（部品か、まとめた線を選んだときだけ）
+    /// 図の代わりにカンバンを出す。「図で見る」を押したら図に切り替えて、その部品を選ぶ
+    fn kanban(&mut self, ui: &mut egui::Ui, body: egui::Rect) {
+        let (Some(view), Some(st)) = (&self.view, &self.state) else { return };
+        let mut act = None;
+        let (board, scope) = (&mut self.board, &self.scope);
+        ui.scope_builder(egui::UiBuilder::new().max_rect(body.shrink2(egui::vec2(20.0, 16.0))), |ui| {
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+            act = board.show(ui, st, view, scope);
+        });
+        if let Some(kanban::Action::Show(id)) = act {
+            (self.board_mode, self.selected, self.bundle, self.list) = (false, Some(id), None, None);
+        }
+    }
+
     fn side_panel(&mut self, ui: &mut egui::Ui, body: egui::Rect) {
         let rect = egui::Rect::from_min_max(egui::pos2(body.max.x - side::WIDTH, body.min.y), body.max);
         let p = ui.painter();
