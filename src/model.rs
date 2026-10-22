@@ -301,9 +301,12 @@ pub struct State {
     pub cards: Vec<Card>,
 }
 
-/// 窓に出すタブの範囲。左から全体（空）、構成図に部品があるプロジェクトを order の順（無ければ名前の順で後ろ）
+/// 窓に出すタブの範囲。左から全体（空）、構成図に部品があるプロジェクトを order の順（無ければ名前の順で後ろ）。
+/// プロジェクトは state の projects にあるもの（kanban.json があるもの）だけ。どこにも属さない部品（arch-shared.json・
+/// project が "shared"）はタブにしない
 pub fn tab_scopes(st: &State) -> Vec<String> {
-    let mut names: Vec<&str> = st.arch.as_ref().map_or(vec![], |a| a.nodes.iter().map(|n| n.project.as_str()).filter(|p| !p.is_empty()).collect());
+    let mut names: Vec<&str> =
+        st.arch.as_ref().map_or(vec![], |a| a.nodes.iter().map(|n| n.project.as_str()).filter(|p| st.projects.contains_key(*p)).collect());
     names.sort();
     names.dedup();
     names.sort_by_key(|n| st.projects.get(*n).and_then(|p| p.order).unwrap_or(i64::MAX));

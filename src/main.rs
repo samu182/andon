@@ -1220,7 +1220,7 @@ mod tests {
         let state = serde_json::json!({
             "generated_at": "2026-10-23T00:00:00",
             "projects": { "a": { "github": "", "order": 2 }, "b": { "github": "", "order": 1, "color": "green3" }, "c": { "github": "" } },
-            "arch": { "zones": [{ "id": "z" }], "nodes": [node("x", "a"), node("y", "b"), node("w", "c")], "edges": [] }
+            "arch": { "zones": [{ "id": "z" }], "nodes": [node("x", "a"), node("y", "b"), node("w", "c"), node("s", "shared")], "edges": [] }
         });
         std::fs::write(&path, state.to_string()).unwrap();
         let _one = ENV.lock().unwrap();
@@ -1247,4 +1247,3 @@ mod tests {
         assert_eq!(v.scope, "later");
     }
 }
-
