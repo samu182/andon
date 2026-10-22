@@ -156,7 +156,7 @@ mod tests {
         a.drift.insert("b".into(), Default::default());
         let st = State { generated_at: "2026-10-14T17:47:34+09:00".into(), arch: Some(a.clone()), ..Default::default() };
         let view = crate::model::view_for(&a, "a", None);
-        let lay = Layout { pos: Default::default(), frames: vec![], paths: vec![], size: (0.0, 0.0), bundles: vec![] };
+        let lay = Layout { pos: Default::default(), frames: vec![], paths: vec![], size: (0.0, 0.0), bundles: vec![], keep: None };
         let d = data(&st, &view, &lay, None, "a", &HashMap::new(), false, false);
         assert!(d.get("future").is_none()); // 構想が無ければ、前と同じ中身
         assert_eq!(d["nodes"].as_array().unwrap().len(), 1);
@@ -185,7 +185,7 @@ mod tests {
         a.drift.insert("a".into(), crate::model::Drift { unclaimed: vec!["src/leak.ts".into()], ..Default::default() });
         let st = State { generated_at: "2026-10-14T17:47:34+09:00".into(), arch: Some(a.clone()), ..Default::default() };
         let view = crate::model::view_for(&a, "a", None);
-        let lay = Layout { pos: Default::default(), frames: vec![], paths: vec![], size: (0.0, 0.0), bundles: vec![] };
+        let lay = Layout { pos: Default::default(), frames: vec![], paths: vec![], size: (0.0, 0.0), bundles: vec![], keep: None };
         let working: HashMap<String, Work> = [("a:x".to_string(), Work { branch: "feat/secret".into(), focused: true })].into_iter().collect();
         let out = html(&data(&st, &view, &lay, None, "a", &working, true, false));
         for gone in ["秘密の依頼文", "feat/secret", "SECRET_KEY", "線の秘密メモ", "src/leak.ts"] {
@@ -208,7 +208,7 @@ mod tests {
         };
         let st = State { arch: Some(a.clone()), ..Default::default() };
         let (now, full) = (crate::model::view_mode(&a, "a", None, false), crate::model::view_mode(&a, "a", None, true));
-        let lay = Layout { pos: Default::default(), frames: vec![], paths: vec![], size: (0.0, 0.0), bundles: vec![] };
+        let lay = Layout { pos: Default::default(), frames: vec![], paths: vec![], size: (0.0, 0.0), bundles: vec![], keep: None };
         let d = data(&st, &now, &lay, Some((&full, &lay)), "a", &HashMap::new(), false, true);
         assert_eq!(d["future"]["nodes"][0], json!("a:x"));
         assert_eq!(d["future"]["nodes"][1]["source"], json!("docs/構想.md#あとで"));

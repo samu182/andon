@@ -48,6 +48,18 @@ pub struct Layout {
     pub paths: Vec<Path>,
     pub size: Pt,
     pub bundles: Vec<Bundle>,
+    /// 枠の並べ方（次に並べ直すとき、枠の組と窓の形が同じなら引き継ぐ）
+    #[serde(skip)]
+    pub keep: Option<Keep>,
+}
+
+/// 枠の順・枠ごとの向き（0 = 横・1 = 縦）・段の切れ目と、そのときの窓の形
+#[derive(Clone, Debug, PartialEq)]
+pub struct Keep {
+    order: Vec<String>,
+    pick: Vec<usize>,
+    starts: Vec<usize>,
+    aspect: f64,
 }
 
 struct Inner {
@@ -404,6 +416,13 @@ fn zone_order(view: &View) -> Vec<String> {
 /// 1 段だけだと全体の図が横に細長くなり（68 部品で 6:1）、窓に収めると 28% に縮んで文字が潰れた（2026-10-06）。
 /// max_rows = 1 なら arch_view.py の layout と同じ答えになる（--dump-layout で突き合わせる）。
 pub fn layout(view: &View, aspect: f64, max_rows: usize) -> Result<Layout, String> {
+    layout_keep(view, aspect, max_rows, None)
+}
+
+/// keep（前の図の枠の並べ方）があり、枠の組と順・窓の形が同じなら、枠の向きと段の分け方は選び直さずに引き継ぐ。
+/// 選び直すと、どこか 1 つの部品の「待ち」が変わっただけで、ほかのプロジェクトの枠まで向きと位置が入れ替わった（2026-10-22）。
+/// 枠の中は毎回並べる（中身が変わった枠の大きさが変われば、同じ段の後ろと下の段はその分ずれる）
+pub fn layout_keep(view: &View, aspect: f64, max_rows: usize, keep: Option<&Keep>) -> Result<Layout, String> {
     let names: HashMap<String, String> = view.nodes.iter().enumerate().map(|(i, n)| (n.id.clone(), format!("n{i}"))).collect();
     let zone_of: HashMap<&str, &str> = view.nodes.iter().map(|n| (n.id.as_str(), n.zone.as_str())).collect();
     let zi_of: HashMap<&str, usize> = view.zones.iter().enumerate().map(|(i, z)| (z.id.as_str(), i)).collect();
@@ -438,7 +457,14 @@ pub fn layout(view: &View, aspect: f64, max_rows: usize) -> Result<Layout, Strin
     let bx = |inner: &Inner| (inner.size.0 + ZONE_PAD * 2.0, inner.size.1 + ZONE_HEAD + ZONE_PAD);
     let n = order.len();
     let mut best: Option<(f64, Vec<usize>, Vec<Pt>, Pt, Vec<f64>)> = None;
-    for starts in row_starts(n, max_rows) {
+    let mut best_starts: Vec<usize> = vec![0];
+    if let Some(k) = keep.filter(|k| k.order == order && (k.aspect - aspect).abs() < 1e-9) {
+        let sizes: Vec<Pt> = k.pick.iter().enumerate().map(|(i, &p)| bx(&options[i][p])).collect();
+        let (spots, total, channels) = arrange_rows(&sizes, &k.starts);
+        best = Some((0.0, k.pick.clone(), spots, total, channels));
+        best_starts = k.starts.clone();
+    }
+    for starts in if best.is_some() { vec![] } else { row_starts(n, max_rows) } {
         for m in 0..(1usize << n) {
             // itertools.product((0, 1), repeat=n) と同じ順（先頭の枠がいちばん上の桁）
             let pick: Vec<usize> = (0..n).map(|i| (m >> (n - 1 - i)) & 1).collect();
@@ -447,10 +473,12 @@ pub fn layout(view: &View, aspect: f64, max_rows: usize) -> Result<Layout, Strin
             let score = ((tw / th) / aspect).ln().abs() + 0.15 * (tw * th).ln(); // 窓の形に近く、なるべく小さく
             if best.as_ref().is_none_or(|b| score < b.0) {
                 best = Some((score, pick, spots, (tw, th), channels));
+                best_starts = starts.clone();
             }
         }
     }
     let (_, pick, spots, total, channels) = best.ok_or("並べる枠が無い")?;
+    let keep = Some(Keep { order: order.clone(), pick: pick.clone(), starts: best_starts, aspect });
     let mut pos = HashMap::new();
     let mut frames: Vec<Frame> = vec![];
     let mut paths: Vec<Option<Path>> = vec![None; view.edges.len()];
@@ -488,7 +516,7 @@ pub fn layout(view: &View, aspect: f64, max_rows: usize) -> Result<Layout, Strin
         }
     }
     let bundles = bundles(view, &pos, &zone_of, &zone_rect, &rects, &channels);
-    Ok(Layout { pos, frames, paths: paths.into_iter().map(|p| p.unwrap()).collect(), size: total, bundles })
+    Ok(Layout { pos, frames, paths: paths.into_iter().map(|p| p.unwrap()).collect(), size: total, bundles, keep })
 }
 
 /// 枠をまたぐ線を、枠の組ごとに 1 本にまとめる。端は枠の、相手に向いた辺（高さは関わる部品の平均）。
@@ -609,5 +637,37 @@ mod tests {
         let kinds: Vec<(&str, usize)> = full.bundles.iter().map(|b| (b.kind.as_str(), b.edges.len())).collect();
         assert!(kinds.contains(&("live", 1)), "{kinds:?}"); // 今の線の束は 1 本のまま、色も変わらない
         assert!(kinds.iter().filter(|k| k.0 == "future").count() == 2, "{kinds:?}");
+    }
+
+    /// 枠 3 つ（どれも部品 2 つを線でつなぐ）。y の「待ち」だけを変えられる
+    fn three(blocked: &str) -> Arch {
+        let st: State = serde_json::from_value(serde_json::json!({ "arch": {
+            "zones": [{ "id": "p:a", "kind": "project" }, { "id": "p:b", "kind": "project" }, { "id": "p:c", "kind": "project" }],
+            "nodes": [
+                { "id": "p:x", "zone": "p:a", "project": "p", "status": "live" }, { "id": "p:y", "zone": "p:a", "project": "p", "status": "wip", "blocked": blocked },
+                { "id": "p:u", "zone": "p:b", "project": "p", "status": "live" }, { "id": "p:v", "zone": "p:b", "project": "p", "status": "live" },
+                { "id": "p:s", "zone": "p:c", "project": "p", "status": "live" }, { "id": "p:t", "zone": "p:c", "project": "p", "status": "live" }
+            ],
+            "edges": [{ "from": "p:x", "to": "p:y" }, { "from": "p:u", "to": "p:v" }, { "from": "p:s", "to": "p:t" }]
+        }}))
+        .unwrap();
+        st.arch.unwrap()
+    }
+
+    #[test]
+    fn 待ちが変わっても枠の向きと段は前の図から引き継ぐ() {
+        let first = layout(&view_mode(&three(""), "", None, false), 1.6, 3).unwrap();
+        let k = first.keep.clone().unwrap();
+        // わざと選ばれなかった向き・段にしても、枠の組と窓の形が同じならそのまま使う
+        let forced = Keep { pick: k.pick.iter().map(|p| 1 - p).collect(), starts: vec![0, 1], ..k.clone() };
+        let next = layout_keep(&view_mode(&three("B-1 待ち"), "", None, false), 1.6, 3, Some(&forced)).unwrap();
+        assert_eq!(next.keep.as_ref(), Some(&forced));
+        // 窓の形が変わったら選び直す（引き継がない）
+        let wide = layout_keep(&view_mode(&three("B-1 待ち"), "", None, false), 4.0, 3, Some(&forced)).unwrap();
+        assert!((wide.keep.unwrap().aspect - 4.0).abs() < 1e-9);
+        // 枠の組が変わったら選び直す
+        let other = Keep { order: vec!["p:a".into(), "p:b".into()], ..forced.clone() };
+        let again = layout_keep(&view_mode(&three(""), "", None, false), 1.6, 3, Some(&other)).unwrap();
+        assert_eq!(again.keep, first.keep);
     }
 }

@@ -808,8 +808,9 @@ impl Viewer {
         let (tx, rx) = mpsc::channel();
         let ctx = self.ctx.clone();
         let aspect = self.aspect();
+        let keep = self.lay.as_ref().and_then(|l| l.keep.clone());
         std::thread::spawn(move || {
-            let lay = layout::layout(&view, aspect, MAX_ROWS);
+            let lay = layout::layout_keep(&view, aspect, MAX_ROWS, keep.as_ref());
             let _ = tx.send((view, lay));
             ctx.request_repaint();
         });
@@ -1078,6 +1079,7 @@ mod tests {
             paths: vec![layout::Path { points: vec![(190.0, 100.0), (410.0, 100.0)], label_at: None }],
             size: (600.0, 200.0),
             bundles: vec![],
+            keep: None,
         };
         (view, lay)
     }
