@@ -207,6 +207,49 @@ pub struct Arch {
     pub repos: HashMap<String, String>,
     /// 構想（arch-future.json）。完成図のときだけ図に足す
     pub future: Future,
+    /// プロジェクトごとの DB の表（arch.py の db が決める）。DB の部品を押したときに出す。図の判断には入らない
+    pub db: HashMap<String, Db>,
+}
+
+/// 1 つのプロジェクトの DB。node は DB の部品の id
+#[derive(Deserialize, Serialize, Clone, Default)]
+#[serde(default)]
+pub struct Db {
+    pub node: String,
+    pub tables: Vec<Table>,
+    /// どの部品か分からないファイル
+    pub unknown: Vec<String>,
+    pub notes: Vec<String>,
+}
+
+/// 表。write・read は部品の id、via は表を触る口（型の名前）、schema は表を作った・変えたファイル
+#[derive(Deserialize, Serialize, Clone, Default)]
+#[serde(default)]
+pub struct Table {
+    pub name: String,
+    pub write: Vec<String>,
+    pub read: Vec<String>,
+    pub files: Vec<String>,
+    pub via: Vec<String>,
+    pub schema: Vec<String>,
+}
+
+/// その部品が DB の部品なら、その DB
+pub fn db_of<'a>(a: &'a Arch, node: &str) -> Option<&'a Db> {
+    a.db.values().find(|d| d.node == node)
+}
+
+/// その部品が書く表と読む表（読むだけのもの）
+pub fn tables_of(a: &Arch, node: &str) -> (Vec<String>, Vec<String>) {
+    let (mut w, mut r) = (vec![], vec![]);
+    for t in a.db.values().flat_map(|d| &d.tables) {
+        if t.write.iter().any(|x| x == node) {
+            w.push(t.name.clone());
+        } else if t.read.iter().any(|x| x == node) {
+            r.push(t.name.clone());
+        }
+    }
+    (w, r)
 }
 
 /// 構想（完成図）。arch.py の future が決める。今の図の判断には入らない
@@ -756,5 +799,25 @@ mod tests {
         assert_eq!(card_node(&view, card("C-1")).map(|n| n.id.as_str()), Some("a:n"));
         assert!(card_node(&view, card("C-2")).is_none()); // 構想の部品へは飛ばない
         assert!(card_node(&view, card("fix-x")).is_none());
+    }
+
+    #[test]
+    fn db_の部品と_部品が触る表() {
+        let st: State = serde_json::from_value(serde_json::json!({ "arch": {
+            "zones": [{ "id": "z" }], "nodes": [{ "id": "p:db", "zone": "z" }, { "id": "p:a", "zone": "z" }], "edges": [],
+            "db": { "p": { "node": "p:db", "tables": [
+                { "name": "orders", "write": ["p:a"], "read": [] },
+                { "name": "tenants", "write": [], "read": ["p:a"] },
+                { "name": "logs", "write": ["p:b"], "read": ["p:a"] }
+            ] } }
+        }}))
+        .unwrap();
+        let a = st.arch.as_ref().unwrap();
+        assert_eq!(db_of(a, "p:db").map(|d| d.tables.len()), Some(3));
+        assert!(db_of(a, "p:a").is_none());
+        assert_eq!(tables_of(a, "p:a"), (vec!["orders".to_string()], vec!["tenants".to_string(), "logs".to_string()]));
+        // db の欄が無い state も読める（前の組み立てが書いたもの）
+        let old: State = serde_json::from_value(serde_json::json!({ "arch": { "zones": [], "nodes": [], "edges": [] } })).unwrap();
+        assert!(old.arch.unwrap().db.is_empty());
     }
 }

@@ -208,6 +208,22 @@ impl Side {
                 }
             });
         }
+        if let Some(a) = st.arch.as_ref() {
+            if let Some(db) = crate::model::db_of(a, &n.id) {
+                self.db_tables(ui, n, db, &names, &mut out);
+            } else {
+                let (w, r) = crate::model::tables_of(a, &n.id);
+                if !w.is_empty() || !r.is_empty() {
+                    self.section(ui, &n.id, "触る表", &format!("（書く {}・読む {}）", w.len(), r.len()), false, |ui| {
+                        for (title, list) in [("書く", &w), ("読む", &r)] {
+                            if !list.is_empty() {
+                                para(ui, &[(&format!("{title}: "), plain(9.0), FAINT), (&list.join("・"), plain(10.0), TEXT)]);
+                            }
+                        }
+                    });
+                }
+            }
+        }
         let mine: Vec<_> = view.edges.iter().filter(|e| e.from == n.id || e.to == n.id).collect();
         let checked: Vec<_> = mine.iter().filter(|e| !e.note.is_empty()).collect();
         if planned || !checked.is_empty() || !n.switch_note.is_empty() {
@@ -290,6 +306,47 @@ impl Side {
             text(ui, "リンクが無い（宣言に paths・docs を足すと、コードと設計へ飛べる）", 9.0, FAINT);
         }
         out
+    }
+
+    /// DB の部品の「表」。表ごとに、書く部品・読む部品（押すとその部品へ）と、通している口（型）。最初から開く
+    fn db_tables(&mut self, ui: &mut Ui, n: &Node, db: &crate::model::Db, names: &HashMap<&str, &str>, out: &mut Option<Action>) {
+        self.section(ui, &n.id, "表", &format!("（{}）", db.tables.len()), true, |ui| {
+            for note in &db.notes {
+                text(ui, note, 9.0, FAINT);
+            }
+            if db.tables.is_empty() && db.notes.is_empty() {
+                text(ui, "表が無い", 9.0, FAINT);
+            }
+            for t in &db.tables {
+                ui.add_space(8.0);
+                para(ui, &[(&t.name, bold(10.0), TEXT)]);
+                for (title, ids) in [("書く", &t.write), ("読む", &t.read)] {
+                    if ids.is_empty() {
+                        continue;
+                    }
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        para(ui, &[(&format!("{title}: "), plain(9.0), FAINT)]);
+                        for (i, id) in ids.iter().enumerate() {
+                            if i > 0 {
+                                para(ui, &[("・", plain(10.0), FAINT)]);
+                            }
+                            link(ui, names.get(id.as_str()).copied().unwrap_or(id), Action::Select(id.clone()), out);
+                        }
+                    });
+                }
+                if t.write.is_empty() && t.read.is_empty() {
+                    text(ui, "触る部品が分からない", 9.0, FAINT);
+                }
+                if !t.via.is_empty() {
+                    text(ui, &format!("口: {}", t.via.join("・")), 9.0, FAINT);
+                }
+            }
+            if !db.unknown.is_empty() {
+                ui.add_space(8.0);
+                text(ui, &format!("どの部品か分からないファイル: {}", db.unknown.join("・")), 9.0, FAINT);
+            }
+        });
     }
 
     /// 構想の部品の中身。短く: 名前・説明・作るかは未定・出所・知らせ・つながり（状態・次の一手・PR は持たない）
