@@ -516,6 +516,10 @@ impl Viewer {
         let side_open = !self.board_mode && (self.selected.is_some() || self.bundle.is_some() || self.list.is_some());
         // 右の欄は図の上に重ねる（出し入れで図の倍率を変えない。選ぶたびに図が縮むと見失う）
         let canvas = if side_open { egui::Rect::from_min_max(body.min, egui::pos2(body.max.x - side::WIDTH, body.max.y)) } else { body };
+        // DB の図を開いているあいだは、あんどんの図をその右（右の欄との間）に収め直す。かぶせると部品が途中で切れて見えた
+        let er_w = self.er_width(body);
+        let canvas = egui::Rect::from_min_max(egui::pos2(canvas.min.x + er_w, canvas.min.y), canvas.max);
+        let fit_area = if er_w > 0.0 { canvas } else { body };
         self.canvas = canvas;
         if self.board_mode {
             self.kanban(ui, body);
@@ -523,7 +527,7 @@ impl Viewer {
         let resp = ui.interact(if self.board_mode { egui::Rect::NOTHING } else { canvas }, egui::Id::new("canvas"), egui::Sense::click_and_drag());
         if let (false, Some(view), Some(lay), Some(st)) = (self.board_mode, &self.view, &self.lay, &self.state) {
             if !self.moved || self.cam.is_none() {
-                self.cam = Some(draw::Camera::fit(body, lay));
+                self.cam = Some(draw::Camera::fit(fit_area, lay));
             }
             let cam = self.cam.as_mut().unwrap();
             if resp.dragged() {
@@ -591,7 +595,8 @@ impl Viewer {
             };
             let none = model::Changes::default();
             let changes = st.arch.as_ref().map_or(&none, |a| &a.changes);
-            draw::diagram(&p.with_clip_rect(body), view, lay, changes, &st.projects, &shown, &focus);
+            let clip = egui::Rect::from_min_max(egui::pos2(body.min.x + er_w, body.min.y), body.max);
+            draw::diagram(&p.with_clip_rect(clip), view, lay, changes, &st.projects, &shown, &focus);
         }
         if !self.board_mode {
             self.er_panel(ui, body);
@@ -793,6 +798,13 @@ impl Viewer {
     /// 右の欄（部品か、まとめた線を選んだときだけ）
     /// DB の部品を選んでいるとき、左半分に DB の図を出す。ドラッグで動かし、ホイールで拡大縮小、表を押すと下に
     /// 書く部品・読む部品（押すとその部品へ）。× か Esc で閉じる（部品を選ぶのをやめる）
+    /// DB の図の幅（開いていなければ 0）。DB の部品を選んでいて、カンバンを出していないとき
+    fn er_width(&self, body: egui::Rect) -> f32 {
+        let open = !self.board_mode
+            && self.selected.as_ref().is_some_and(|id| self.state.as_ref().and_then(|s| s.arch.as_ref()).is_some_and(|a| model::db_of(a, id).is_some()));
+        if open { (body.width() * 0.5).max(420.0).min(body.width() - side::WIDTH - 40.0) } else { 0.0 }
+    }
+
     fn er_panel(&mut self, ui: &mut egui::Ui, body: egui::Rect) {
         let db = match (&self.selected, self.state.as_ref().and_then(|s| s.arch.as_ref())) {
             (Some(id), Some(a)) => model::db_of(a, id).cloned(),
@@ -802,7 +814,7 @@ impl Viewer {
             self.er = None;
             return;
         };
-        let w = (body.width() * 0.5).max(420.0).min(body.width() - side::WIDTH - 40.0);
+        let w = self.er_width(body);
         let panel = egui::Rect::from_min_max(body.min, egui::pos2(body.min.x + w, body.max.y));
         let head = egui::Rect::from_min_size(panel.min, egui::vec2(panel.width(), 40.0));
         let area = egui::Rect::from_min_max(egui::pos2(panel.min.x, head.max.y), panel.max);
@@ -813,8 +825,13 @@ impl Viewer {
             self.er = Some(ErState { key, lay: er::er_layout(&db, aspect), cam: None, moved: false, picked, hover: None });
         }
         let p = ui.painter().with_clip_rect(panel);
-        p.rect_filled(panel, 0.0, draw::BG);
-        p.line_segment([panel.right_top(), panel.right_bottom()], egui::Stroke::new(1.0_f32, draw::LINE));
+        p.rect_filled(panel, 0.0, er::BACK);
+        let edge = ui.painter();
+        for (i, a) in [0.10_f32, 0.06, 0.03].iter().enumerate() {
+            let x = panel.max.x + 1.0 + i as f32;
+            edge.line_segment([egui::pos2(x, panel.min.y), egui::pos2(x, panel.max.y)], egui::Stroke::new(1.0_f32, egui::Color32::BLACK.gamma_multiply(*a)));
+        }
+        edge.line_segment([panel.right_top(), panel.right_bottom()], egui::Stroke::new(1.0_f32, draw::CARD_LINE));
         let resp = ui.interact(panel, egui::Id::new("er"), egui::Sense::click_and_drag());
         let e = self.er.as_mut().unwrap();
         let mut close = false;
@@ -822,10 +839,17 @@ impl Viewer {
         // 見出し: 何の図か・数・閉じる
         p.rect_filled(head, 0.0, draw::PANEL);
         p.line_segment([head.left_bottom(), head.right_bottom()], egui::Stroke::new(1.0_f32, draw::LINE));
-        let fks = er::foreign_keys(&db).len();
-        let none = if fks == 0 { "（外部キーの宣言なし）" } else { "" };
-        let title = format!("DB の図　表 {}・外部キー {fks}{none}", db.tables.len());
-        p.text(egui::pos2(head.min.x + 16.0, head.center().y), egui::Align2::LEFT_CENTER, title, draw::font(10.0, true), draw::TEXT);
+        let fks = er::foreign_keys(&db);
+        let none = if fks.is_empty() { "（外部キーの宣言なし）" } else { "" };
+        let title = format!("DB の図　表 {}・外部キー {}{none}", db.tables.len(), fks.len());
+        let t = p.text(egui::pos2(head.min.x + 16.0, head.center().y), egui::Align2::LEFT_CENTER, title, draw::font(10.0, true), draw::TEXT);
+        let mut hubs: Vec<String> = er::hubs(&db).into_iter().collect();
+        hubs.sort();
+        if !hubs.is_empty() {
+            let n = fks.iter().filter(|k| hubs.contains(&k.2)).count();
+            let note = format!("{} への外部キー（{n} 本）は線にせず、列に → で書く", hubs.join("・"));
+            p.text(egui::pos2(t.max.x + 16.0, head.center().y), egui::Align2::LEFT_CENTER, note, draw::font(9.0, false), draw::FAINT);
+        }
         let x = p.text(egui::pos2(head.max.x - 16.0, head.center().y), egui::Align2::RIGHT_CENTER, "×", draw::font(13.0, false), draw::FAINT);
         let x = x.expand(6.0);
         match &e.lay {

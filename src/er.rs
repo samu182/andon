@@ -14,8 +14,12 @@ pub const HEAD: f64 = 26.0;
 pub const ROW: f64 = 17.0;
 const BOX_PAD: f64 = 6.0;
 /// 線の色。普段は薄く、選んだ表の線だけ濃く（参照される表に線が集まるので、全部を濃くすると読めない）
-const QUIET: Color32 = Color32::from_rgb(0xc9, 0xce, 0xd4);
-const LOUD: Color32 = Color32::from_rgb(0x5f, 0x67, 0x72);
+const QUIET: Color32 = Color32::from_rgb(0x9a, 0xa3, 0xad);
+const LOUD: Color32 = BONE;
+/// 列が読める倍率（行の高さが文字の下限より高い）。全体を収めるとこれより小さくなるときは、この倍率で左上から出す
+pub const READABLE: f32 = 0.8;
+/// 図の背景（あんどんの図と分ける）
+pub const BACK: Color32 = Color32::from_rgb(0xf6, 0xf7, 0xf9);
 const HEAD_FILL: Color32 = Color32::from_rgb(0xf3, 0xf4, 0xf6);
 
 #[derive(Clone, Debug)]
@@ -59,6 +63,24 @@ pub fn foreign_keys(db: &Db) -> Vec<(String, String, String)> {
     out
 }
 
+/// 多くの表が指す表（指す表が 6 つ以上かつ全体の 4 割以上）。ここへの外部キーは線にせず、列に「→ 表」と書く。
+/// どの表もその表を指していると、線が 1 か所に集まって図が横に広がり、ほかの線が読めなくなった（2026-10-23）
+pub fn hubs(db: &Db) -> HashSet<String> {
+    let mut by: HashMap<&str, HashSet<&str>> = HashMap::new();
+    let all = foreign_keys(db);
+    for (child, _, parent) in &all {
+        by.entry(parent.as_str()).or_default().insert(child.as_str());
+    }
+    let need = 6usize.max((db.tables.len() as f64 * 0.4).ceil() as usize);
+    by.into_iter().filter(|(_, c)| c.len() >= need).map(|(p, _)| p.to_string()).collect()
+}
+
+/// 線にする外部キー（hubs への外部キーは除く）
+pub fn drawn_keys(db: &Db) -> Vec<(String, String, String)> {
+    let h = hubs(db);
+    foreign_keys(db).into_iter().filter(|(_, _, p)| !h.contains(p)).collect()
+}
+
 fn one(db: &Db, rankdir: &str) -> Result<ErLayout, String> {
     let names: HashMap<&str, String> = db.tables.iter().enumerate().map(|(i, t)| (t.name.as_str(), format!("t{i}"))).collect();
     let mut lines = vec![
@@ -69,7 +91,7 @@ fn one(db: &Db, rankdir: &str) -> Result<ErLayout, String> {
     for t in &db.tables {
         lines.push(format!("{} [width={:.3}, height={:.3}];", names[t.name.as_str()], BOX_W / 72.0, box_h(t) / 72.0));
     }
-    let fks = foreign_keys(db);
+    let fks = drawn_keys(db);
     for (child, _, parent) in &fks {
         lines.push(format!("{} -> {};", names[parent.as_str()], names[child.as_str()]));
     }
@@ -129,7 +151,10 @@ pub fn er_layout(db: &Db, aspect: f64) -> Result<ErLayout, String> {
 /// 全体を収める
 pub fn fit(area: Rect, lay: &ErLayout) -> Camera {
     let (sw, sh) = (lay.size.0 as f32 + 20.0, lay.size.1 as f32 + 20.0);
-    let scale = ((area.width() - 24.0) / sw).min((area.height() - 24.0) / sh).clamp(0.1, 1.2);
+    let scale = ((area.width() - 24.0) / sw).min((area.height() - 24.0) / sh).min(1.2);
+    if scale < READABLE {
+        return Camera { scale: READABLE, origin: area.min + vec2(16.0, 16.0) };
+    }
     let origin = area.min + vec2((area.width() - sw * scale) / 2.0 + 10.0 * scale, (area.height() - sh * scale) / 2.0 + 10.0 * scale);
     Camera { scale, origin }
 }
@@ -208,8 +233,9 @@ pub fn paint(p: &Painter, db: &Db, lay: &ErLayout, cam: &Camera, focus: Option<&
                 p.text(pos2(x, y), Align2::LEFT_CENTER, mark, tag.clone(), alpha(if c.pk { BONE } else { DIM }));
             }
             x += 22.0 * s;
-            let type_w = measure(p, &c.r#type, &f).min(r.width() * 0.4);
-            p.text(pos2(r.max.x - pad, y), Align2::RIGHT_CENTER, draw::clip(p, &c.r#type, &f, type_w), f.clone(), alpha(FAINT));
+            let (right, ink) = if c.fk.is_empty() { (c.r#type.clone(), FAINT) } else { (format!("→ {}", c.fk), BONE) };
+            let type_w = measure(p, &right, &f).min(r.width() * 0.45);
+            p.text(pos2(r.max.x - pad, y), Align2::RIGHT_CENTER, draw::clip(p, &right, &f, type_w), f.clone(), alpha(ink));
             let room = r.max.x - pad - type_w - 8.0 * s - x;
             p.text(pos2(x, y), Align2::LEFT_CENTER, draw::clip(p, &c.name, &f, room), f.clone(), alpha(if c.pk { TEXT } else { DIM }));
         }
@@ -261,5 +287,31 @@ mod tests {
         let c = Rect::from_min_size(cam.xy(lay.boxes[0].at), vec2(10.0, 10.0)).center();
         assert_eq!(table_at(&cam, &lay, c).as_deref(), Some("parents"));
         assert!(er_layout(&Db::default(), 1.0).unwrap().boxes.is_empty());
+    }
+
+    #[test]
+    fn 多くの表が指す表への外部キーは線にしない() {
+        // 7 表が hub を指し、a だけが b を指す（hub は 6 表以上かつ 4 割以上に指される）
+        let mut tables = vec![serde_json::json!({ "name": "hub", "columns": [{ "name": "id", "pk": true }] }),
+                              serde_json::json!({ "name": "b", "columns": [{ "name": "id", "pk": true }] })];
+        for i in 0..7 {
+            let mut cols = vec![serde_json::json!({ "name": "hub_id", "fk": "hub" })];
+            if i == 0 {
+                cols.push(serde_json::json!({ "name": "b_id", "fk": "b" }));
+            }
+            tables.push(serde_json::json!({ "name": format!("t{i}"), "columns": cols }));
+        }
+        let db: Db = serde_json::from_value(serde_json::json!({ "node": "p:db", "tables": tables })).unwrap();
+        assert_eq!(hubs(&db), HashSet::from(["hub".to_string()]));
+        assert_eq!(drawn_keys(&db), vec![("t0".to_string(), "b_id".to_string(), "b".to_string())]);
+        assert_eq!(foreign_keys(&db).len(), 8); // 数えるときは全部
+        let lay = er_layout(&db, 1.0).unwrap();
+        assert_eq!(lay.edges.len(), 1);
+        // 小さな図は読める倍率のまま真ん中に、大きな図は読める倍率で左上から
+        let big = ErLayout { size: (3000.0, 3000.0), ..Default::default() };
+        let area = Rect::from_min_size(pos2(10.0, 20.0), vec2(800.0, 600.0));
+        let cam = fit(area, &big);
+        assert_eq!((cam.scale, cam.origin), (READABLE, pos2(26.0, 36.0)));
+        assert!(fit(area, &lay).scale >= READABLE);
     }
 }

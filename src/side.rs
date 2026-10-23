@@ -211,7 +211,7 @@ impl Side {
         if let Some(a) = st.arch.as_ref() {
             if let Some(db) = crate::model::db_of(a, &n.id) {
                 label(ui, "DB の図");
-                let fks = crate::er::foreign_keys(db).len();
+                let fks = crate::er::foreign_keys(db).len();  // 線にしないものも数える
                 text(ui, &format!("左に出している（表 {}・外部キー {fks}）。表を押すと、書く部品・読む部品", db.tables.len()), 9.0, FAINT);
             } else {
                 let (w, r) = crate::model::tables_of(a, &n.id);
