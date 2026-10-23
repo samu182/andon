@@ -1386,8 +1386,9 @@ mod tests {
             "generated_at": "2026-10-06T00:00:00",
             "arch": { "zones": [{ "id": "z" }], "nodes": [node("c", 3, "wip"), node("a", 1, "live"), node("b", 2, "live")], "edges": [] }
         });
+        // 書くところから鍵を取る（同じファイルを使うテストが並んで走ると、書きかけを読んで落ちた）
+        let _one = ENV.lock().unwrap_or_else(|e| e.into_inner());
         std::fs::write(&path, state.to_string()).unwrap();
-        let _one = ENV.lock().unwrap();
         unsafe { std::env::set_var("ARCH_STATE", &path) };
         Viewer::new(egui::Context::default(), String::new(), None)
     }
@@ -1457,8 +1458,9 @@ mod tests {
             "projects": { "a": { "github": "", "order": 2 }, "b": { "github": "", "order": 1, "color": "green3" }, "c": { "github": "" } },
             "arch": { "zones": [{ "id": "z" }], "nodes": [node("x", "a"), node("y", "b"), node("w", "c"), node("s", "shared")], "edges": [] }
         });
+        // 書くところから鍵を取る（同じファイルを使うテストが並んで走ると、書きかけを読んで落ちた）
+        let _one = ENV.lock().unwrap_or_else(|e| e.into_inner());
         std::fs::write(&path, state.to_string()).unwrap();
-        let _one = ENV.lock().unwrap();
         unsafe { std::env::set_var("ARCH_STATE", &path) };
         Viewer::new(egui::Context::default(), "c".into(), None)
     }
