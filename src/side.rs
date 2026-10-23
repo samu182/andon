@@ -210,7 +210,9 @@ impl Side {
         }
         if let Some(a) = st.arch.as_ref() {
             if let Some(db) = crate::model::db_of(a, &n.id) {
-                self.db_tables(ui, n, db, &names, &mut out);
+                label(ui, "DB の図");
+                let fks = crate::er::foreign_keys(db).len();
+                text(ui, &format!("左に出している（表 {}・外部キー {fks}）。表を押すと、書く部品・読む部品", db.tables.len()), 9.0, FAINT);
             } else {
                 let (w, r) = crate::model::tables_of(a, &n.id);
                 if !w.is_empty() || !r.is_empty() {
@@ -306,47 +308,6 @@ impl Side {
             text(ui, "リンクが無い（宣言に paths・docs を足すと、コードと設計へ飛べる）", 9.0, FAINT);
         }
         out
-    }
-
-    /// DB の部品の「表」。表ごとに、書く部品・読む部品（押すとその部品へ）と、通している口（型）。最初から開く
-    fn db_tables(&mut self, ui: &mut Ui, n: &Node, db: &crate::model::Db, names: &HashMap<&str, &str>, out: &mut Option<Action>) {
-        self.section(ui, &n.id, "表", &format!("（{}）", db.tables.len()), true, |ui| {
-            for note in &db.notes {
-                text(ui, note, 9.0, FAINT);
-            }
-            if db.tables.is_empty() && db.notes.is_empty() {
-                text(ui, "表が無い", 9.0, FAINT);
-            }
-            for t in &db.tables {
-                ui.add_space(8.0);
-                para(ui, &[(&t.name, bold(10.0), TEXT)]);
-                for (title, ids) in [("書く", &t.write), ("読む", &t.read)] {
-                    if ids.is_empty() {
-                        continue;
-                    }
-                    ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing.x = 0.0;
-                        para(ui, &[(&format!("{title}: "), plain(9.0), FAINT)]);
-                        for (i, id) in ids.iter().enumerate() {
-                            if i > 0 {
-                                para(ui, &[("・", plain(10.0), FAINT)]);
-                            }
-                            link(ui, names.get(id.as_str()).copied().unwrap_or(id), Action::Select(id.clone()), out);
-                        }
-                    });
-                }
-                if t.write.is_empty() && t.read.is_empty() {
-                    text(ui, "触る部品が分からない", 9.0, FAINT);
-                }
-                if !t.via.is_empty() {
-                    text(ui, &format!("口: {}", t.via.join("・")), 9.0, FAINT);
-                }
-            }
-            if !db.unknown.is_empty() {
-                ui.add_space(8.0);
-                text(ui, &format!("どの部品か分からないファイル: {}", db.unknown.join("・")), 9.0, FAINT);
-            }
-        });
     }
 
     /// 構想の部品の中身。短く: 名前・説明・作るかは未定・出所・知らせ・つながり（状態・次の一手・PR は持たない）

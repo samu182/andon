@@ -232,6 +232,18 @@ pub struct Table {
     pub files: Vec<String>,
     pub via: Vec<String>,
     pub schema: Vec<String>,
+    /// 列（作った順・足した順）
+    pub columns: Vec<Column>,
+}
+
+/// 列。fk は参照する表（無ければ空）
+#[derive(Deserialize, Serialize, Clone, Default)]
+#[serde(default)]
+pub struct Column {
+    pub name: String,
+    pub r#type: String,
+    pub pk: bool,
+    pub fk: String,
 }
 
 /// その部品が DB の部品なら、その DB

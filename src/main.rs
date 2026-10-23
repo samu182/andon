@@ -23,6 +23,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod draw;
+mod er;
 mod export;
 mod kanban;
 mod layout;
@@ -230,6 +231,17 @@ struct Tab {
     stash: Option<(View, Layout)>,
 }
 
+/// DB の図。key（DB の部品と表の中身）が替わったら並べ直す
+struct ErState {
+    key: String,
+    lay: Result<er::ErLayout, String>,
+    cam: Option<draw::Camera>,
+    moved: bool,
+    /// 押した表（下に、書く部品・読む部品を出す）
+    picked: Option<String>,
+    hover: Option<String>,
+}
+
 /// 図の上の、押した・乗せた所にあるもの
 enum Hit {
     Node(String),
@@ -248,6 +260,8 @@ struct Viewer {
     /// 図の代わりにカンバンを出しているか（b・上の帯の「図｜カンバン」）。全部のタブで共通
     board_mode: bool,
     board: kanban::Board,
+    /// DB の図（DB の部品を選んでいるとき、左半分に出す）
+    er: Option<ErState>,
     msg: String,
     /// 裏で並べている最中の結果の受け口（Graphviz に数百ミリ秒かかるので、窓の糸では待たない）。
     /// 中身（View）と並べ方は必ず組で入れ替える
@@ -324,6 +338,7 @@ impl Viewer {
             full: std::env::var("ARCH_FUTURE").is_ok_and(|s| s == "1"),
             board_mode: std::env::var("ARCH_BOARD").is_ok_and(|s| s == "1"),
             board: Default::default(),
+            er: None,
             msg: String::new(),
             pending: None,
             state_mtime: state_mtime(),
@@ -578,6 +593,9 @@ impl Viewer {
             let changes = st.arch.as_ref().map_or(&none, |a| &a.changes);
             draw::diagram(&p.with_clip_rect(body), view, lay, changes, &st.projects, &shown, &focus);
         }
+        if !self.board_mode {
+            self.er_panel(ui, body);
+        }
         self.strip(ui, &p, strip);
         self.tabbar(ui, &p, tabbar);
         if side_open {
@@ -773,6 +791,145 @@ impl Viewer {
     }
 
     /// 右の欄（部品か、まとめた線を選んだときだけ）
+    /// DB の部品を選んでいるとき、左半分に DB の図を出す。ドラッグで動かし、ホイールで拡大縮小、表を押すと下に
+    /// 書く部品・読む部品（押すとその部品へ）。× か Esc で閉じる（部品を選ぶのをやめる）
+    fn er_panel(&mut self, ui: &mut egui::Ui, body: egui::Rect) {
+        let db = match (&self.selected, self.state.as_ref().and_then(|s| s.arch.as_ref())) {
+            (Some(id), Some(a)) => model::db_of(a, id).cloned(),
+            _ => None,
+        };
+        let Some(db) = db else {
+            self.er = None;
+            return;
+        };
+        let w = (body.width() * 0.5).max(420.0).min(body.width() - side::WIDTH - 40.0);
+        let panel = egui::Rect::from_min_max(body.min, egui::pos2(body.min.x + w, body.max.y));
+        let head = egui::Rect::from_min_size(panel.min, egui::vec2(panel.width(), 40.0));
+        let area = egui::Rect::from_min_max(egui::pos2(panel.min.x, head.max.y), panel.max);
+        let key = format!("{}|{}", db.node, serde_json::to_string(&db.tables).unwrap_or_default());
+        if self.er.as_ref().is_none_or(|e| e.key != key) {
+            let picked = self.er.take().and_then(|e| e.picked).filter(|p| db.tables.iter().any(|t| &t.name == p));
+            let aspect = (area.width() / area.height().max(1.0)) as f64;
+            self.er = Some(ErState { key, lay: er::er_layout(&db, aspect), cam: None, moved: false, picked, hover: None });
+        }
+        let p = ui.painter().with_clip_rect(panel);
+        p.rect_filled(panel, 0.0, draw::BG);
+        p.line_segment([panel.right_top(), panel.right_bottom()], egui::Stroke::new(1.0_f32, draw::LINE));
+        let resp = ui.interact(panel, egui::Id::new("er"), egui::Sense::click_and_drag());
+        let e = self.er.as_mut().unwrap();
+        let mut close = false;
+        let mut go: Option<String> = None;
+        // 見出し: 何の図か・数・閉じる
+        p.rect_filled(head, 0.0, draw::PANEL);
+        p.line_segment([head.left_bottom(), head.right_bottom()], egui::Stroke::new(1.0_f32, draw::LINE));
+        let fks = er::foreign_keys(&db).len();
+        let none = if fks == 0 { "（外部キーの宣言なし）" } else { "" };
+        let title = format!("DB の図　表 {}・外部キー {fks}{none}", db.tables.len());
+        p.text(egui::pos2(head.min.x + 16.0, head.center().y), egui::Align2::LEFT_CENTER, title, draw::font(10.0, true), draw::TEXT);
+        let x = p.text(egui::pos2(head.max.x - 16.0, head.center().y), egui::Align2::RIGHT_CENTER, "×", draw::font(13.0, false), draw::FAINT);
+        let x = x.expand(6.0);
+        match &e.lay {
+            Err(msg) => {
+                p.text(area.center(), egui::Align2::CENTER_CENTER, format!("並べられない: {msg}"), draw::font(9.0, false), draw::FAINT);
+            }
+            Ok(lay) => {
+                if !e.moved || e.cam.is_none() {
+                    e.cam = Some(er::fit(area, lay));
+                }
+                let cam = e.cam.as_mut().unwrap();
+                if resp.dragged() {
+                    cam.origin += resp.drag_delta();
+                    e.moved = true;
+                }
+                if let (true, Some(at)) = (resp.hovered(), resp.hover_pos()) {
+                    let notches: f32 = ui.input(|i| {
+                        i.events
+                            .iter()
+                            .filter_map(|ev| match ev {
+                                egui::Event::MouseWheel { unit, delta, .. } => {
+                                    Some(if *unit == egui::MouseWheelUnit::Line { delta.y } else { delta.y / 50.0 })
+                                }
+                                _ => None,
+                            })
+                            .sum()
+                    });
+                    if notches != 0.0 {
+                        let ns = (cam.scale * (notches * 0.12).exp()).clamp(0.1, 3.0);
+                        cam.origin = at - (at - cam.origin) * (ns / cam.scale);
+                        cam.scale = ns;
+                        e.moved = true;
+                    }
+                }
+                let cam = draw::Camera { scale: cam.scale, origin: cam.origin };
+                let at = if resp.dragged() { None } else { resp.hover_pos().filter(|q| area.contains(*q)) };
+                e.hover = at.and_then(|q| er::table_at(&cam, lay, q));
+                if e.hover.is_some() || resp.hover_pos().is_some_and(|q| x.contains(q)) {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                if resp.clicked() {
+                    let q = resp.interact_pointer_pos();
+                    if q.is_some_and(|q| x.contains(q)) {
+                        close = true;
+                    } else {
+                        let hit = q.filter(|q| area.contains(*q)).and_then(|q| er::table_at(&cam, lay, q));
+                        e.picked = if hit == e.picked { None } else { hit };
+                    }
+                }
+                let focus = e.hover.as_deref().or(e.picked.as_deref());
+                er::paint(&p.with_clip_rect(area), &db, lay, &cam, focus);
+            }
+        }
+        if matches!(e.lay, Err(_)) && resp.clicked() && resp.interact_pointer_pos().is_some_and(|q| x.contains(q)) {
+            close = true;
+        }
+        // 押した表: 下に、書く部品・読む部品（押すとその部品へ）と口
+        if let Some(t) = e.picked.as_ref().and_then(|n| db.tables.iter().find(|t| &t.name == n)) {
+            let names: std::collections::HashMap<&str, &str> =
+                self.view.as_ref().map(|v| v.nodes.iter().map(|n| (n.id.as_str(), n.title.as_str())).collect()).unwrap_or_default();
+            let foot = egui::Rect::from_min_max(egui::pos2(panel.min.x, panel.max.y - 120.0), egui::pos2(panel.max.x - 1.0, panel.max.y));
+            p.rect_filled(foot, 0.0, draw::PANEL);
+            p.line_segment([foot.left_top(), foot.right_top()], egui::Stroke::new(1.0_f32, draw::LINE));
+            ui.scope_builder(egui::UiBuilder::new().max_rect(foot.shrink2(egui::vec2(16.0, 10.0))), |ui| {
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+                egui::ScrollArea::vertical().id_salt("er-foot").auto_shrink([false, false]).show(ui, |ui| {
+                    let head = format!("{}　列 {}", t.name, t.columns.len());
+                    ui.label(egui::RichText::new(head).font(draw::font(10.0, true)).color(draw::TEXT));
+                    for (title, ids) in [("書く", &t.write), ("読む", &t.read)] {
+                        if ids.is_empty() {
+                            continue;
+                        }
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            ui.label(egui::RichText::new(title).font(draw::font(9.0, false)).color(draw::FAINT));
+                            for id in ids {
+                                let name = names.get(id.as_str()).copied().unwrap_or(id);
+                                let l = ui.add(
+                                    egui::Label::new(egui::RichText::new(name).font(draw::font(9.0, false)).color(draw::BONE)).sense(egui::Sense::click()),
+                                );
+                                if l.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                                    go = Some(id.clone());
+                                }
+                            }
+                        });
+                    }
+                    if t.write.is_empty() && t.read.is_empty() {
+                        ui.label(egui::RichText::new("触る部品が分からない").font(draw::font(9.0, false)).color(draw::FAINT));
+                    }
+                    if !t.via.is_empty() {
+                        let via = format!("口: {}", t.via.join("・"));
+                        ui.label(egui::RichText::new(via).font(draw::font(9.0, false)).color(draw::FAINT));
+                    }
+                });
+            });
+        }
+        if close {
+            (self.selected, self.er) = (None, None);
+        }
+        if let Some(id) = go {
+            (self.selected, self.bundle) = (Some(id), None);
+        }
+    }
+
     /// 図の代わりにカンバンを出す。「図で見る」を押したら図に切り替えて、その部品を選ぶ
     fn kanban(&mut self, ui: &mut egui::Ui, body: egui::Rect) {
         let (Some(view), Some(st)) = (&self.view, &self.state) else { return };

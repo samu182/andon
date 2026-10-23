@@ -91,7 +91,7 @@ pub fn hidden(cmd: &mut Command) -> &mut Command {
     cmd
 }
 
-fn run_dot(src: &str) -> Result<serde_json::Value, String> {
+pub(crate) fn run_dot(src: &str) -> Result<serde_json::Value, String> {
     let mut cmd = Command::new(dot_exe());
     hidden(cmd.arg("-Tjson").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()));
     let mut child = cmd.spawn().map_err(|e| format!("dot を起動できない: {e}"))?;
@@ -103,7 +103,7 @@ fn run_dot(src: &str) -> Result<serde_json::Value, String> {
     serde_json::from_slice(&out.stdout).map_err(|e| format!("dot の出力が読めない: {e}"))
 }
 
-fn floats(v: &serde_json::Value) -> Vec<f64> {
+pub(crate) fn floats(v: &serde_json::Value) -> Vec<f64> {
     v.as_str().unwrap_or("").split(',').filter_map(|s| s.trim().parse().ok()).collect()
 }
 
@@ -124,7 +124,7 @@ fn bezier(pts: &[Pt], steps: usize) -> Vec<Pt> {
 }
 
 /// Graphviz の線の形（pos）を、なめらかな折れ線にする。
-fn spline(pos: &str, flip: &dyn Fn(f64, f64) -> Pt) -> Vec<Pt> {
+pub(crate) fn spline(pos: &str, flip: &dyn Fn(f64, f64) -> Pt) -> Vec<Pt> {
     let (mut pts, mut end) = (vec![], None);
     for tok in pos.split_whitespace() {
         let parts: Vec<&str> = tok.split(',').collect();
