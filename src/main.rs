@@ -236,7 +236,10 @@ struct Tab {
 struct ErState {
     key: String,
     project: String,
-    lay: Result<er::ErLayout, String>,
+    /// 並べ終わった図。裏で並べ直しているあいだは前の図のまま（初めてなら None）
+    lay: Option<Result<er::ErLayout, String>>,
+    /// 裏で並べている最中の受け口（並べ終わったら key と組で受け取る）
+    pending: Option<mpsc::Receiver<(String, Result<er::ErLayout, String>)>>,
     cam: Option<draw::Camera>,
     moved: bool,
     /// 押した表（右の欄に中身）
@@ -887,19 +890,36 @@ impl Viewer {
         let aspect = (area.width() / area.height().max(1.0)) as f64;
         let key = format!("{project}|{}|{open_keys:?}|{:.1}", serde_json::to_string(&db.tables).unwrap_or_default(), aspect);
         if self.er.as_ref().is_none_or(|e| e.key != key) {
+            // 裏で並べる（dot を 20 回ほど起動するので、窓の糸で待つと止まる）。並べ終わるまで、同じプロジェクトなら前の図のまま
             let old = self.er.take().filter(|e| e.project == project);
             let picked = old.as_ref().and_then(|e| e.picked.clone()).filter(|n| db.tables.iter().any(|t| &t.name == n));
-            let (cam, moved) = old.map_or((None, false), |e| (e.cam, e.moved)); // 列を開いても、見ていた場所はそのまま
-            self.er = Some(ErState { key, project: project.clone(), lay: er::er_layout(&db, &opened, aspect), cam, moved, picked, hover: None });
+            let (cam, moved, lay) = old.map_or((None, false, None), |e| (e.cam, e.moved, e.lay)); // 列を開いても、見ていた場所はそのまま
+            let (tx, rx) = mpsc::channel();
+            let (job_db, job_open, job_key, ctx) = (db.clone(), opened.clone(), key.clone(), ui.ctx().clone());
+            std::thread::spawn(move || {
+                let _ = tx.send((job_key, er::er_layout(&job_db, &job_open, aspect)));
+                ctx.request_repaint();
+            });
+            self.er = Some(ErState { key, project: project.clone(), lay, pending: Some(rx), cam, moved, picked, hover: None });
+        }
+        if let Some(e) = self.er.as_mut() {
+            if let Some((k, lay)) = e.pending.as_ref().and_then(|rx| rx.try_recv().ok()) {
+                if k == e.key {
+                    (e.lay, e.pending) = (Some(lay), None);
+                }
+            }
         }
         let resp = ui.interact(area, egui::Id::new("er"), egui::Sense::click_and_drag());
         let e = self.er.as_mut().unwrap();
         let mut toggle: Option<String> = None;
         match &e.lay {
-            Err(msg) => {
+            None => {
+                p.text(area.center(), egui::Align2::CENTER_CENTER, "並べている", draw::font(10.0, false), draw::FAINT);
+            }
+            Some(Err(msg)) => {
                 p.text(area.center(), egui::Align2::CENTER_CENTER, format!("並べられない: {msg}"), draw::font(9.0, false), draw::FAINT);
             }
-            Ok(lay) => {
+            Some(Ok(lay)) => {
                 if !e.moved || e.cam.is_none() {
                     e.cam = Some(er::fit(area, lay));
                 }

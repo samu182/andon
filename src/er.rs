@@ -252,20 +252,28 @@ pub fn er_layout(db: &Db, opened: &HashSet<String>, aspect: f64) -> Result<ErLay
         let r = root(&mut up, i);
         groups.entry(r).or_default().push(db.tables[i].clone());
     }
-    // 固まりごとに、上下と横のうち正方形に近い方で並べる
-    let mut pieces = vec![];
-    for tables in groups.into_values() {
-        let sub = Db { tables, ..Default::default() };
-        let tb = one(&sub, &h, &rels, opened, "TB")?;
-        let piece = if sub.tables.len() > 2 {
-            let lr = one(&sub, &h, &rels, opened, "LR")?;
-            let sq = |l: &ErLayout| (l.size.0 / l.size.1.max(1.0)).ln().abs();
-            if sq(&lr) < sq(&tb) { lr } else { tb }
-        } else {
-            tb
-        };
-        pieces.push(piece);
-    }
+    // 固まりごとに、上下と横のうち正方形に近い方で並べる。dot は 1 回の起動に 1 秒ほどかかるので、全部を同時に走らせる
+    let subs: Vec<Db> = groups.into_values().map(|tables| Db { tables, ..Default::default() }).collect();
+    let pieces: Vec<ErLayout> = std::thread::scope(|s| {
+        let jobs: Vec<_> = subs
+            .iter()
+            .map(|sub| {
+                let (h, rels) = (&h, &rels);
+                let tb = s.spawn(move || one(sub, h, rels, opened, "TB"));
+                let lr = (sub.tables.len() > 2).then(|| s.spawn(move || one(sub, h, rels, opened, "LR")));
+                (tb, lr)
+            })
+            .collect();
+        jobs.into_iter()
+            .map(|(tb, lr)| {
+                let tb = tb.join().map_err(|_| "並べる糸が落ちた".to_string())??;
+                let Some(lr) = lr else { return Ok(tb) };
+                let lr = lr.join().map_err(|_| "並べる糸が落ちた".to_string())??;
+                let sq = |l: &ErLayout| (l.size.0 / l.size.1.max(1.0)).ln().abs();
+                Ok(if sq(&lr) < sq(&tb) { lr } else { tb })
+            })
+            .collect::<Result<Vec<_>, String>>()
+    })?;
     Ok(pack(pieces, aspect))
 }
 

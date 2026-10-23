@@ -91,8 +91,51 @@ pub fn hidden(cmd: &mut Command) -> &mut Command {
     cmd
 }
 
+/// dot に読ませる部品の置き場（GVBINDIR）。Graphviz の bin の config8 から core と dot_layout だけを抜き出し、その 2 つの dll と
+/// 一緒に ~/.herdr/graphviz に置く。文字の幅を Pango で測る部品（gvplugin_pango）を読むと、Windows のフォントを探すのに
+/// 1 回 5〜15 秒かかった（Graphviz 16.1・2026-10-23）。読まなければ dot は文字の幅を目安で見積もる（並び方はほぼ同じ・数点の差）。
+/// 作れなければ None（今までどおり Graphviz の bin の部品を読む）
+fn fast_bindir() -> Option<PathBuf> {
+    static DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let bin = dot_exe().parent()?.to_path_buf();
+        let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
+        let dir = PathBuf::from(home).join(".herdr").join("graphviz");
+        let config = std::fs::read_to_string(bin.join("config8")).ok()?;
+        let mut keep = vec![
+            "# あんどんが dot を呼ぶときだけ使う部品の一覧（core と dot_layout だけ）。あんどんが Graphviz の bin/config8 から作る".to_string(),
+        ];
+        let mut on = false;
+        for line in config.lines() {
+            if !line.starts_with(['\t', ' ', '}']) && !line.starts_with('#') && !line.is_empty() {
+                on = line.starts_with("gvplugin_core.dll ") || line.starts_with("gvplugin_dot_layout.dll ");
+            }
+            if on {
+                keep.push(line.to_string());
+            }
+        }
+        if keep.len() < 3 {
+            return None;
+        }
+        std::fs::create_dir_all(&dir).ok()?;
+        for dll in ["gvplugin_core.dll", "gvplugin_dot_layout.dll"] {
+            let (from, to) = (bin.join(dll), dir.join(dll));
+            let stale = std::fs::metadata(&to).map_or(true, |m| m.len() != std::fs::metadata(&from).map(|f| f.len()).unwrap_or(0));
+            if stale {
+                std::fs::copy(&from, &to).ok()?;
+            }
+        }
+        std::fs::write(dir.join("config8"), keep.join("\n") + "\n").ok()?;
+        Some(dir)
+    })
+    .clone()
+}
+
 pub(crate) fn run_dot(src: &str) -> Result<serde_json::Value, String> {
     let mut cmd = Command::new(dot_exe());
+    if let Some(dir) = fast_bindir() {
+        cmd.env("GVBINDIR", dir);
+    }
     hidden(cmd.arg("-Tjson").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()));
     let mut child = cmd.spawn().map_err(|e| format!("dot を起動できない: {e}"))?;
     child.stdin.take().unwrap().write_all(src.as_bytes()).map_err(|e| format!("dot に渡せない: {e}"))?;
