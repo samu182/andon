@@ -220,6 +220,8 @@ pub struct Db {
     /// どの部品か分からないファイル
     pub unknown: Vec<String>,
     pub notes: Vec<String>,
+    /// 日本語の名前が無い表（図と現物のずれに出す）
+    pub unlabeled: Vec<String>,
 }
 
 /// 表。write・read は部品の id、via は表を触る口（型の名前）、schema は表を作った・変えたファイル
@@ -234,6 +236,12 @@ pub struct Table {
     pub schema: Vec<String>,
     /// 列（作った順・足した順）
     pub columns: Vec<Column>,
+    /// 日本語の名前（宣言の db.tables）。無ければ空
+    pub label: String,
+    /// 1 行の説明（宣言か、SQL のコメント）
+    pub note: String,
+    /// まとめる枠（主に書く部品の id）
+    pub part: String,
 }
 
 /// 列。fk は参照する表（無ければ空）
@@ -244,6 +252,11 @@ pub struct Column {
     pub r#type: String,
     pub pk: bool,
     pub fk: String,
+    /// 宣言は無いが、同じ値で引いている表
+    pub r#ref: String,
+    pub unique: bool,
+    /// SQL のコメント
+    pub note: String,
 }
 
 /// その部品が DB の部品なら、その DB

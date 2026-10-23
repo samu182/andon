@@ -606,12 +606,22 @@ pub enum HeadHit {
     Map,
     /// カンバンにする
     Board,
+    /// DB の図にする
+    Db,
+}
+
+/// 図の代わりに何を出しているか
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Which {
+    Map,
+    Board,
+    Db,
 }
 
 /// 上の帯（題・凡例・ずれと変化の数・操作の案内・何時の state か）。返すのは押せる所。
 /// mode: 構想があれば、今の図か完成図か（Some(true) = 完成図）。構想が無ければ None で、切り替えを出さない
-/// board: カンバンを出しているか（凡例は図のものなので出さない）
-pub fn header(p: &Painter, area: Rect, meta: &str, drift: usize, changes: usize, mode: Option<bool>, board: bool) -> Vec<(Rect, HeadHit)> {
+/// which: 図・カンバン・DB のどれを出しているか（凡例は図のものなので、図のときだけ）。has_db: 今のタブに DB の宣言があるか
+pub fn header(p: &Painter, area: Rect, meta: &str, drift: usize, changes: usize, mode: Option<bool>, which: Which, has_db: bool) -> Vec<(Rect, HeadHit)> {
     let r = Rect::from_min_size(area.min, vec2(area.width(), HEAD_H));
     p.rect_filled(r, 0.0, PANEL);
     p.line_segment([pos2(r.min.x, r.max.y), pos2(r.max.x, r.max.y)], Stroke::new(1.0_f32, LINE));
@@ -619,7 +629,7 @@ pub fn header(p: &Painter, area: Rect, meta: &str, drift: usize, changes: usize,
     // 凡例: 線の種類 4 つ（形で分ける）と、部品の地の色 4 つを 1 行で
     let (f, y) = (font(9.0, false), r.center().y);
     let mut x = r.min.x + 14.0;
-    for k in if board { &[][..] } else { &["live", "wip", "none", "stop"][..] } {
+    for k in if which != Which::Map { &[][..] } else { &["live", "wip", "none", "stop"][..] } {
         let k = *k;
         polyline(p, vec![pos2(x, y), pos2(x + 24.0, y)], 1.0, EDGE, dash(k), "", (0.0, 0.0, 0.0));
         x += 30.0;
@@ -644,14 +654,23 @@ pub fn header(p: &Painter, area: Rect, meta: &str, drift: usize, changes: usize,
     let mut hits = vec![(sh.expand(4.0), HeadHit::Share), (ex.expand(4.0), HeadHit::Export)];
     let mut right = ex.min.x - 24.0;
     {
-        // 図｜カンバン。選んでいる方を太く濃く
+        // 図｜カンバン｜DB。選んでいるものを太く濃く。DB は今のタブに DB の宣言があるときだけ
         let (on, off) = (font(9.0, true), font(9.0, false));
-        let b = p.text(pos2(right, y), Align2::RIGHT_CENTER, "カンバン", if board { on.clone() } else { off.clone() }, if board { TEXT } else { DIM });
-        let bar = p.text(pos2(b.min.x - 4.0, y), Align2::RIGHT_CENTER, "｜", off.clone(), FAINT);
-        let a = p.text(pos2(bar.min.x - 4.0, y), Align2::RIGHT_CENTER, "図", if board { off } else { on }, if board { DIM } else { TEXT });
-        hits.push((a.expand(4.0), HeadHit::Map));
-        hits.push((b.expand(4.0), HeadHit::Board));
-        right = a.min.x - 24.0;
+        let mut items = vec![("図", Which::Map, HeadHit::Map), ("カンバン", Which::Board, HeadHit::Board)];
+        if has_db {
+            items.push(("DB", Which::Db, HeadHit::Db));
+        }
+        for (k, (text, w, hit)) in items.into_iter().rev().enumerate() {
+            if k > 0 {
+                let bar = p.text(pos2(right - 4.0, y), Align2::RIGHT_CENTER, "｜", off.clone(), FAINT);
+                right = bar.min.x - 4.0;
+            }
+            let sel = which == w;
+            let b = p.text(pos2(right, y), Align2::RIGHT_CENTER, text, if sel { on.clone() } else { off.clone() }, if sel { TEXT } else { DIM });
+            hits.push((b.expand(4.0), hit));
+            right = b.min.x;
+        }
+        right -= 24.0;
     }
     if let Some(full) = mode {
         // 今｜完成図。選んでいる方を太く濃く

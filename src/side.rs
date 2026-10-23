@@ -209,10 +209,8 @@ impl Side {
             });
         }
         if let Some(a) = st.arch.as_ref() {
-            if let Some(db) = crate::model::db_of(a, &n.id) {
-                label(ui, "DB の図");
-                let fks = crate::er::foreign_keys(db).len();  // 線にしないものも数える
-                text(ui, &format!("左に出している（表 {}・外部キー {fks}）。表を押すと、書く部品・読む部品", db.tables.len()), 9.0, FAINT);
+            if crate::model::db_of(a, &n.id).is_some() {
+                // DB の部品を押すと DB の図に切り替わるので、ここには来ない（来ても何も出さない）
             } else {
                 let (w, r) = crate::model::tables_of(a, &n.id);
                 if !w.is_empty() || !r.is_empty() {
@@ -443,8 +441,10 @@ pub fn drift_lines(st: &State, view: &View) -> Vec<Line> {
     let Some(a) = &st.arch else { return lines };
     let projects: std::collections::BTreeSet<&str> = view.nodes.iter().filter(|n| !n.future).map(|n| n.project.as_str()).collect();
     for p in projects {
-        let Some(d) = a.drift.get(p) else { continue };
-        if d.unclaimed.is_empty() && d.missing.is_empty() && d.unplanned.is_empty() && d.stale_docs.is_empty() {
+        let none = crate::model::Drift::default();
+        let d = a.drift.get(p).unwrap_or(&none);
+        let unlabeled = a.db.get(p).map_or(&[][..], |x| x.unlabeled.as_slice());
+        if d.unclaimed.is_empty() && d.missing.is_empty() && d.unplanned.is_empty() && d.stale_docs.is_empty() && unlabeled.is_empty() {
             continue;
         }
         let gh = st.projects.get(p).map(|x| x.github.clone()).unwrap_or_default();
@@ -459,6 +459,9 @@ pub fn drift_lines(st: &State, view: &View) -> Vec<Line> {
         }
         for u in &d.unplanned {
             lines.push(Line::Text(format!("図に無い計画: {} {}", u.id, u.title), 10.0, TEXT));
+        }
+        for t in unlabeled {
+            lines.push(Line::Text(format!("DB の表に日本語の名前が無い: {t}（宣言の db.tables に足す）"), 10.0, TEXT));
         }
         for s in &d.stale_docs {
             let nodes: Vec<&str> = s.nodes.iter().map(|n| n.split_once(':').map_or(n.as_str(), |x| x.1)).collect();
@@ -475,7 +478,8 @@ pub fn drift_lines(st: &State, view: &View) -> Vec<Line> {
 pub fn drift_count(st: &State, view: &View) -> usize {
     let Some(a) = &st.arch else { return 0 };
     let projects: std::collections::BTreeSet<&str> = view.nodes.iter().filter(|n| !n.future).map(|n| n.project.as_str()).collect(); // 構想はずれに数えない
-    projects.iter().filter_map(|p| a.drift.get(*p)).map(|d| d.unclaimed.len() + d.missing.len() + d.unplanned.len() + d.stale_docs.len()).sum()
+    let drift: usize = projects.iter().filter_map(|p| a.drift.get(*p)).map(|d| d.unclaimed.len() + d.missing.len() + d.unplanned.len() + d.stale_docs.len()).sum();
+    drift + projects.iter().filter_map(|p| a.db.get(*p)).map(|d| d.unlabeled.len()).sum::<usize>() // DB の表に日本語の名前が無い
 }
 
 /// 前回（その日の最初の写し）からの変化
