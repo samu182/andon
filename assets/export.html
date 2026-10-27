@@ -1,0 +1,768 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>あんどん</title>
+<!-- あんどんの書き出し（andon の src/export.rs が中身を埋める）。描き方は draw.rs、右の欄は side.rs の写し。
+     その時点の写しなので、組み立て直しは追わない。ネットにはつながない。
+     構想があれば（D.future）完成図の中身と並べ方も入っていて、「今｜完成図」か k で切り替える -->
+<style>
+  :root {
+    --bg: #eceef1; --dot: #d5d9de; --panel: #ffffff; --line: #d5d9de; --text: #1f2328; --dim: #4b535d; --faint: #636c76;
+    --bone: #1e3a8a; --error: #cf222e; --live: #1a7f37; --wip: #2f6fd0; --stop: #bf8700; --none: #8c959f;
+    --font: "BIZ UDPGothic", "BIZ UDPゴシック", "Yu Gothic UI", "Meiryo", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body { background: var(--bg); color: var(--text); font: 13px/1.5 var(--font); overflow: hidden;
+         display: grid; grid-template-rows: 44px 1fr 64px; }
+  header { background: var(--panel); border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 18px;
+           padding: 0 14px; min-width: 0; white-space: nowrap; overflow: hidden; }
+  header .scope { font-weight: 700; font-size: 13px; }
+  .legend { display: flex; align-items: center; gap: 18px; color: var(--dim); font-size: 12px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  header .right { margin-left: auto; display: flex; align-items: center; gap: 16px; font-size: 12px; color: var(--dim); }
+  .hlink { color: var(--bone); font-weight: 700; cursor: pointer; background: none; border: 0; font: inherit; padding: 0; }
+  .hlink:hover { text-decoration: underline; }
+  .mode { display: inline-flex; align-items: center; gap: 4px; color: var(--faint); }
+  .mode button { background: none; border: 0; padding: 0; font: 12px var(--font); color: var(--dim); cursor: pointer; }
+  .mode button.on { font-weight: 700; color: var(--text); }
+  #stage { position: relative; min-height: 0; overflow: hidden;
+           background-color: var(--bg); background-image: radial-gradient(var(--dot) 1px, transparent 1.3px);
+           background-size: 22px 22px; background-position: 11px 11px; }
+  #svg { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; cursor: default; user-select: none; }
+  #svg.pick { cursor: pointer; }
+  #svg.drag { cursor: grabbing; }
+  aside { position: absolute; top: 0; right: 0; bottom: 0; width: 340px; max-width: 100%; background: var(--panel);
+          border-left: 1px solid var(--line); overflow: auto; padding: 16px 20px 24px 16px; display: none; }
+  aside.open { display: block; }
+  aside h2 { font-size: 16px; margin: 0 0 6px; font-weight: 700; }
+  aside .lab { font-size: 12px; font-weight: 700; color: var(--faint); margin: 12px 0 2px; }
+  aside .rows { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin-top: 4px; }
+  aside .rows .k { color: var(--faint); font-size: 12px; }
+  aside .faint { color: var(--faint); font-size: 12px; }
+  aside .next { font-weight: 700; }
+  aside a, aside .sel { color: var(--bone); text-decoration: none; cursor: pointer; }
+  aside a:hover, aside .sel:hover { text-decoration: underline; }
+  aside details { margin-top: 10px; }
+  aside summary { font-weight: 700; cursor: pointer; list-style: none; }
+  aside summary::-webkit-details-marker { display: none; }
+  aside summary::before { content: "› "; }
+  aside details[open] > summary::before { content: "∨ "; }
+  aside summary .c { font-weight: 400; color: var(--faint); font-size: 12px; }
+  aside .item.done { color: var(--faint); }
+  aside .links { display: flex; flex-wrap: wrap; gap: 4px 12px; }
+  aside .copy { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+  aside button.btn { background: #fff; border: 1px solid var(--line); color: var(--bone); font: 700 12px var(--font);
+                     padding: 4px 10px; border-radius: 4px; cursor: pointer; }
+  aside .dotc { font-size: 12px; }
+  aside .line { margin-top: 4px; }
+  footer { background: var(--panel); border-top: 1px solid var(--line); display: flex; align-items: center; gap: 12px;
+           padding: 0 16px; min-width: 0; overflow: hidden; }
+  footer .owner { color: var(--bone); font-weight: 700; cursor: pointer; white-space: nowrap; font-size: 12px; }
+  footer .none { color: var(--faint); font-size: 12px; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; height: 28px; border-radius: 14px; border: 1px solid var(--line);
+          background: var(--panel); padding: 0 12px 0 6px; cursor: pointer; min-width: 36px; flex: 0 1 auto; font: 12px var(--font);
+          color: var(--faint); overflow: hidden; }
+  .chip.done { color: var(--text); }
+  .chip.next { box-shadow: inset 0 0 0 2px var(--bone); }
+  .chip.on { background: var(--bone); border-color: var(--bone); color: #fff; }
+  .chip .n { flex: none; width: 16px; height: 16px; border-radius: 50%; border: 1px solid var(--bone); background: var(--panel);
+             color: var(--bone); font: 700 11px Consolas, var(--font); display: grid; place-items: center; }
+  .chip.done .n { background: var(--bone); color: #fff; }
+  .chip.on .n { background: var(--panel); color: var(--bone); border-color: #fff; }
+  .chip.on.done .n { background: #fff; }
+  .chip .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #flash { position: absolute; left: 50%; top: 10px; transform: translateX(-50%); background: var(--text); color: #fff;
+           padding: 4px 12px; border-radius: 4px; font-size: 12px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+  #flash.on { opacity: .9; }
+  .help { color: var(--faint); }
+  @media (max-width: 760px) { .legend, .help { display: none; } }
+</style>
+</head>
+<body>
+<header>
+  <span class="scope" id="scope"></span>
+  <div class="legend" id="legend"></div>
+  <div class="right">
+    <button class="hlink" id="drift" hidden></button>
+    <button class="hlink" id="changes" hidden></button>
+    <span class="mode" id="mode" hidden><button data-m="now">今</button>｜<button data-m="full">完成図</button></span>
+    <span class="help">ドラッグで移動・ホイールで拡大・f 全体・s 骨格だけ・←→ 骨格をたどる</span>
+    <span id="meta"></span>
+  </div>
+</header>
+<div id="stage">
+  <svg id="svg" xmlns="http://www.w3.org/2000/svg"></svg>
+  <aside id="side"></aside>
+  <div id="flash"></div>
+</div>
+<footer id="strip"></footer>
+<script id="data" type="application/json">/*DATA*/</script>
+<script>
+"use strict";
+const D = JSON.parse(document.getElementById("data").textContent);
+const NODE_W = D.size.node_w, NODE_H = D.size.node_h, ZONE_HEAD = D.size.zone_head;
+const R_NODE = 6, R_ZONE = 10, MIN_FONT = 11, SIDE_W = 340, BLINK = 800;
+const C = {
+  bg: "#eceef1", panel: "#ffffff", line: "#d5d9de", card: "#ffffff", shadow: "#e4e7eb", text: "#1f2328", dim: "#4b535d",
+  faint: "#636c76", edge: "#5f6772", quiet: "#d9dde2", cardLine: "#bfc5cd", bone: "#1e3a8a", white: "#ffffff", error: "#cf222e",
+  kind: "#e2e5e9",
+};
+const TINT = { wip: "#e6effc", stop: "#fbf1d6", none: "#eef0f2" };
+const STATUS = { live: "#1a7f37", wip: "#2f6fd0", stop: "#bf8700" };
+const SHORT = { live: "本番", wip: "作りかけ", stop: "待ち" };
+const LONG = { live: "本番で動いている", wip: "作りかけ", stop: "待ち" };
+const DASH = { live: "", wip: "7 5", stop: "10 4 2 4" };
+const PROJECT_MARKS = ["#dce6f4", "#e7dcf4"];
+// 構想（完成図だけ）: 塗らず、細い点線と薄い文字だけ。状態の色は付けない
+const FUTURE_LINE = "#aab1b9", FUTURE_TEXT = "#8c959f", FUTURE_DASH = "2 4";
+const FAMILY = getComputedStyle(document.documentElement).getPropertyValue("--font");
+
+const statusColor = k => STATUS[k] || "#8c959f";
+const tint = k => TINT[k] || C.card;
+const short = k => SHORT[k] || "まだ無い";
+const long = k => LONG[k] || "まだ無い";
+const dash = k => (k in DASH ? DASH[k] : "2 5");
+const kindOf = x => (x.blocked ? "stop" : x.status);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+const tail = s => (s.includes(":") ? s.slice(s.indexOf(":") + 1) : s);
+
+// ---- 文字 ----
+const meas = document.createElement("canvas").getContext("2d");
+const font = (px, bold) => ({ size: Math.max(Math.round(px * 1.33), MIN_FONT), bold: !!bold });
+const numFont = px => ({ size: Math.max(Math.round(px * 1.33), MIN_FONT), bold: true, num: true });
+const css = f => `${f.bold ? 700 : 400} ${f.size}px ${f.num ? "Consolas, " : ""}${FAMILY}`;
+function measure(s, f) { meas.font = css(f); return meas.measureText(s).width; }
+function clip(s, f, room) {
+  s = s || "";
+  if (measure(s, f) <= room) return s;
+  const ch = [...s];
+  while (ch.length && measure(ch.join("") + "…", f) > room) ch.pop();
+  return ch.join("") + "…";
+}
+
+// ---- 中身（今の図と完成図。完成図の部品のうち、今の図にもあるものは id だけで入っている） ----
+const MODES = { now: { nodes: D.nodes, edges: D.edges, zones: D.zones, layout: D.layout, owners: D.owners } };
+if (D.future) {
+  const present = Object.fromEntries(D.nodes.map(n => [n.id, n]));
+  const f = D.future;
+  MODES.full = { nodes: f.nodes.map(n => (typeof n === "string" ? present[n] : n)), edges: f.edges, zones: f.zones, layout: f.layout, owners: f.owners };
+}
+let mode, nodes, edges, zones, L, byId, zoneOf, zoneMark, reasons, owners;
+let owner = D.owner || null;
+function useMode(m) {
+  mode = m;
+  ({ nodes, edges, zones, owners } = MODES[m]);
+  L = MODES[m].layout;
+  byId = Object.fromEntries(nodes.map(n => [n.id, n]));
+  zoneOf = Object.fromEntries(nodes.map(n => [n.id, n.zone]));
+  zoneMark = makeZoneMark();
+  reasons = makeReasons();
+}
+function stepOf(n) { return owner && n.steps && owner in n.steps ? n.steps[owner] : null; }
+function bones() { return nodes.filter(n => stepOf(n) != null).sort((a, b) => stepOf(a) - stepOf(b)); }
+function through() {
+  const b = bones();
+  let k = 0;
+  for (const n of b) { if (n.status !== "live" || n.blocked) break; k = stepOf(n); }
+  const nx = b.find(n => stepOf(n) > k);
+  return { through: k, next: nx ? nx.id : null };
+}
+
+// ---- 見ている所 ----
+const st = { cam: null, moved: false, selected: null, bundle: null, list: null, hoverNode: null, hoverEdge: null,
+             bonesOnly: false, flow: null, playing: null, lit: true };
+const svg = document.getElementById("svg"), side = document.getElementById("side"), stage = document.getElementById("stage");
+
+function canvasRect() {
+  const w = stage.clientWidth, h = stage.clientHeight;
+  const open = st.selected || st.bundle != null || st.list;
+  return { x0: 0, y0: 0, x1: open ? Math.max(w - SIDE_W, 0) : w, y1: h };
+}
+function fit() {
+  const w = stage.clientWidth, h = stage.clientHeight;
+  let [x0, y0, x1, y1] = [0, 0, L.size[0], L.size[1]];
+  for (const pts of [...L.paths.map(p => p.points), ...L.bundles.map(b => b.points)])
+    for (const q of pts) { x0 = Math.min(x0, q[0]); y0 = Math.min(y0, q[1]); x1 = Math.max(x1, q[0]); y1 = Math.max(y1, q[1]); }
+  x0 -= 10; y0 -= 10;
+  const sw = x1 + 10 - x0, sh = y1 + 10 - y0;
+  const scale = Math.min((w - 24) / sw, (h - 24) / sh, 1.4);
+  return { scale, ox: (w - sw * scale) / 2 - x0 * scale, oy: (h - sh * scale) / 2 - y0 * scale };
+}
+const xy = (cam, p) => [cam.ox + p[0] * cam.scale, cam.oy + p[1] * cam.scale];
+function nodeRect(cam, c) {
+  const [x, y] = xy(cam, c), w = NODE_W * cam.scale, h = NODE_H * cam.scale;
+  return { x0: x - w / 2, y0: y - h / 2, x1: x + w / 2, y1: y + h / 2 };
+}
+function distanceTo(pts, at) {
+  let best = Infinity;
+  for (let i = 0; i + 1 < pts.length; i++) {
+    const [a, b] = [pts[i], pts[i + 1]], ab = [b[0] - a[0], b[1] - a[1]], l2 = ab[0] ** 2 + ab[1] ** 2;
+    const t = l2 > 0 ? Math.min(Math.max(((at[0] - a[0]) * ab[0] + (at[1] - a[1]) * ab[1]) / l2, 0), 1) : 0;
+    best = Math.min(best, Math.hypot(at[0] - a[0] - ab[0] * t, at[1] - a[1] - ab[1] * t));
+  }
+  return best;
+}
+
+// ---- 描く（draw.rs の diagram の写し。画面の座標で毎回描き直す） ----
+let out = [];
+const attr = o => Object.entries(o).filter(([, v]) => v != null && v !== "").map(([k, v]) => `${k}="${esc(v)}"`).join(" ");
+function rect(r, rad, fill, stroke, width, dasharray) {
+  out.push(`<rect ${attr({ x: r.x0, y: r.y0, width: Math.max(r.x1 - r.x0, 0), height: Math.max(r.y1 - r.y0, 0), rx: rad,
+    fill: fill || "none", stroke: stroke, "stroke-width": stroke ? width : null, "stroke-dasharray": dasharray })}/>`);
+}
+function text(x, y, align, s, f, color) {
+  const w = measure(s, f);
+  const anchor = align[0] === "l" ? "start" : align[0] === "r" ? "end" : "middle";
+  const cy = align[1] === "t" ? y + f.size / 2 : align[1] === "b" ? y - f.size / 2 : y;
+  out.push(`<text x="${x}" y="${cy}" text-anchor="${anchor}" dominant-baseline="central" style="font:${esc(css(f))}" fill="${color}">${esc(s)}</text>`);
+  const x0 = anchor === "start" ? x : anchor === "end" ? x - w : x - w / 2;
+  return { x0, y0: cy - f.size / 2, x1: x0 + w, y1: cy + f.size / 2 };
+}
+function arrowHead(pts, shape, width, color) {
+  const n = pts.length;
+  if (n < 2) return;
+  const tip = pts[n - 1];
+  let prev = null;
+  for (let i = n - 2; i >= 0; i--) if (Math.hypot(pts[i][0] - tip[0], pts[i][1] - tip[1]) > 0.5) { prev = pts[i]; break; }
+  if (!prev) return;
+  const l = Math.hypot(tip[0] - prev[0], tip[1] - prev[1]), d = [(tip[0] - prev[0]) / l, (tip[1] - prev[1]) / l], pp = [-d[1], d[0]];
+  const [d1, d2, d3] = shape, wing = d3 + width / 2;
+  const neck = [tip[0] - d[0] * d1, tip[1] - d[1] * d1], back = [tip[0] - d[0] * d2, tip[1] - d[1] * d2];
+  const poly = [tip, [back[0] + pp[0] * wing, back[1] + pp[1] * wing], neck, [back[0] - pp[0] * wing, back[1] - pp[1] * wing]];
+  out.push(`<polygon points="${poly.map(q => q.join(",")).join(" ")}" fill="${color}"/>`);
+  pts[n - 1] = neck;
+}
+function polyline(pts, width, color, dasharray, arrow, shape) {
+  pts = pts.map(q => [...q]);
+  if (arrow === "last" || arrow === "both") arrowHead(pts, shape, width, color);
+  if (arrow === "first" || arrow === "both") { pts.reverse(); arrowHead(pts, shape, width, color); pts.reverse(); }
+  out.push(`<polyline points="${pts.map(q => q.join(",")).join(" ")}" fill="none" stroke="${color}" stroke-width="${width}" ${dasharray ? `stroke-dasharray="${dasharray}"` : ""} stroke-linejoin="round"/>`);
+}
+const intersects = (a, b) => a.x0 <= b.x1 && b.x0 <= a.x1 && a.y0 <= b.y1 && b.y0 <= a.y1;
+function crowdCount(crowd, r, own) {
+  let n = crowd.boxes.filter(([x, id]) => id !== own && intersects(x, r)).length;
+  for (const [pts, id] of crowd.lines) {
+    if (id === own) continue;
+    for (let i = 0; i + 1 < pts.length; i++) {
+      const s = { x0: Math.min(pts[i][0], pts[i + 1][0]) - 1, y0: Math.min(pts[i][1], pts[i + 1][1]) - 1,
+                  x1: Math.max(pts[i][0], pts[i + 1][0]) + 1, y1: Math.max(pts[i][1], pts[i + 1][1]) + 1 };
+      if (intersects(s, r)) { n++; break; }
+    }
+  }
+  return n;
+}
+function placeLabel(crowd, s, f, pts, own) {
+  if (pts.length < 2) return;
+  const seg = [];
+  for (let i = 0; i + 1 < pts.length; i++) seg.push(Math.hypot(pts[i + 1][0] - pts[i][0], pts[i + 1][1] - pts[i][1]));
+  const total = Math.max(seg.reduce((a, b) => a + b, 0), 1), w = measure(s, f) + 10, h = f.size + 4;
+  let best = null;
+  for (const frac of [0.5, 0.4, 0.6, 0.3, 0.7, 0.2, 0.8, 0.12, 0.88]) {
+    let d = frac * total, at = pts[0];
+    for (let i = 0; i < seg.length; i++) {
+      if (d <= seg[i] && seg[i] > 0) { at = [pts[i][0] + (pts[i + 1][0] - pts[i][0]) * d / seg[i], pts[i][1] + (pts[i + 1][1] - pts[i][1]) * d / seg[i]]; break; }
+      d -= seg[i];
+    }
+    const n = crowdCount(crowd, { x0: at[0] - w / 2, y0: at[1] - h / 2, x1: at[0] + w / 2, y1: at[1] + h / 2 }, own);
+    if (!best || n < best[0]) best = [n, at];
+    if (n === 0) break;
+  }
+  const at = best[1], r = { x0: at[0] - w / 2, y0: at[1] - h / 2, x1: at[0] + w / 2, y1: at[1] + h / 2 };
+  rect(r, h / 2, C.panel, C.line, 1);
+  text(at[0], at[1], "cc", s, f, C.dim);
+  crowd.boxes.push([r, own]);
+}
+function projectMark(color) {
+  const c = (color || "").toLowerCase();
+  const table = [["red", "#f6dde2"], ["pink", "#f6dde2"], ["orange", "#f6e3d5"], ["yellow", "#f3eed8"], ["gold", "#f3eed8"],
+    ["green", "#dcefe2"], ["cyan", "#d9eef0"], ["aqua", "#d9eef0"], ["turquoise", "#d9eef0"], ["purple", "#e7dcf4"],
+    ["magenta", "#e7dcf4"], ["blue", "#dce6f4"]];
+  const hit = c && table.find(([k]) => c.includes(k));
+  return hit ? hit[1] : null;
+}
+function makeZoneMark() {
+  let i = 0;
+  const m = {};
+  for (const z of zones) {
+    // 構想だけの枠は塗らない（色を順に配るのも、今の枠の色をずらさないように飛ばす）
+    if (z.future || ["external", "company", "cloud"].includes(z.kind)) m[z.id] = C.kind;
+    else m[z.id] = projectMark((D.projects[z.project] || {}).color) || PROJECT_MARKS[i++ % 2];
+  }
+  return m;
+}
+function makeReasons() {
+  const r = {};
+  zones.forEach((z, zi) => {
+    const groups = [];
+    for (const n of nodes) if (n.zone === z.id && n.blocked && !groups.includes(n.blocked)) groups.push(n.blocked);
+    groups.forEach((g, gi) => (r[`z${zi}_b${gi}`] = g));
+  });
+  return r;
+}
+useMode(D.future && D.start_full ? "full" : "now");
+
+function diagram(cam) {
+  out = [];
+  const s = cam.scale, fnode = st.hoverNode || st.selected;
+  const tags = [];
+  for (const f of L.frames) {
+    const [a, b] = xy(cam, [f.box[0], f.box[1]]), [c, d] = xy(cam, [f.box[2], f.box[3]]);
+    const r = { x0: a, y0: b, x1: c, y1: d };
+    if (reasons[f.key]) { rect(r, 0, null, C.faint, 1, "4 3"); tags.push([r, reasons[f.key]]); continue; }
+    const z = zones[+f.key.slice(1)];
+    if (!z) continue;
+    // 構想だけの枠: 塗らず、点線の輪郭と薄い文字
+    if (z.future) rect(r, R_ZONE * s, null, FUTURE_LINE, 1, FUTURE_DASH);
+    else rect(r, R_ZONE * s, zoneMark[z.id], C.cardLine, 1);
+    const tf = font(14 * s, true), sf = font(9 * s, false), head = ZONE_HEAD * s;
+    const top = Math.max(Math.min(10 * s, (head - tf.size - sf.size - 4) / 2), 3), room = r.x1 - r.x0 - 32 * s;
+    const t = text(r.x0 + 16 * s, r.y0 + top, "lt", clip(z.title, tf, room), tf, z.future ? FUTURE_TEXT : C.text);
+    if (z.sub && t.y1 + 2 + sf.size <= r.y0 + head - 2)
+      text(r.x0 + 16 * s, Math.min(r.y0 + 33 * s, t.y1 + 2), "lt", clip(z.sub, sf, room), sf, z.future ? FUTURE_TEXT : C.dim);
+  }
+  const mine = edges.map((e, i) => i).filter(i => fnode && (edges[i].from === fnode || edges[i].to === fnode));
+  const near = new Set(fnode ? [fnode] : []);
+  for (const i of mine) { near.add(edges[i].from); near.add(edges[i].to); }
+  const crowd = { boxes: [], lines: [] }, labels = [];
+  L.bundles.forEach((b, bi) => {
+    const pts = b.points.map(q => xy(cam, q)), quiet = !!fnode || st.bonesOnly;
+    const future = b.kind === "future"; // 構想の線だけの束（今の線とは混ぜていない）。本数の札は付けない
+    crowd.lines.push([pts, 10000 + bi]);
+    polyline(pts, quiet || future ? 1 : 2, quiet ? C.quiet : future ? FUTURE_LINE : C.edge, future ? FUTURE_DASH : dash(b.kind), b.arrow, [9, 10, 4]);
+    if (!quiet && !future) labels.push([`${b.edges.length} 本`, font(9 * s), pts, 10000 + bi]);
+  });
+  edges.forEach((e, i) => {
+    const strong = mine.includes(i), path = L.paths[i];
+    if (!path || (zoneOf[e.from] !== zoneOf[e.to] && !strong)) return;
+    const pts = path.points.map(q => xy(cam, q)), kind = kindOf(e);
+    const faded = (st.bonesOnly && !e.skeleton) || (fnode && !strong);
+    crowd.lines.push([pts, 20000 + i]);
+    polyline(pts, strong ? 2 : 1, faded ? C.quiet : strong ? C.bone : e.future ? FUTURE_LINE : C.edge, e.future ? FUTURE_DASH : dash(kind), "last", [8, 9, 3]);
+    if (e.label && (strong || st.hoverEdge === i)) labels.push([e.label, font(9 * s), pts, 20000 + i]);
+  });
+  const sk = through(), w = NODE_W * s;
+  nodes.forEach((n, ni) => {
+    const c = L.pos[n.id];
+    if (!c) return;
+    const r = nodeRect(cam, c);
+    crowd.boxes.push([r, ni]);
+    const kind = kindOf(n), sel = st.selected === n.id;
+    const faded = (st.bonesOnly && !n.skeleton) || (fnode && !near.has(n.id));
+    const pad = Math.max(12 * s, 6), sf = font(9 * s), tf = font(10 * s, true);
+    const two = r.y1 - r.y0 >= (tf.size + sf.size) * 1.3 + 4;
+    const titleY = two ? r.y0 + Math.max(15 * s, tf.size * 0.5 + 3) : (r.y0 + r.y1) / 2;
+    const subY = r.y1 - Math.max(14 * s, sf.size * 0.5 + 3);
+    if (n.future) {
+      // 構想: 塗らない。細い点線の輪郭と薄い文字だけ（状態・骨格の番号・作業中・変化は持たない）
+      const [line, ink] = faded ? [C.quiet, FUTURE_LINE] : sel ? [C.bone, FUTURE_TEXT] : [FUTURE_LINE, FUTURE_TEXT];
+      rect(r, R_NODE * s, null, line, sel ? 2 : 1, FUTURE_DASH);
+      text(r.x0 + pad, titleY, "lc", clip(n.title, tf, w - pad * 2), tf, ink);
+      if (two) text(r.x0 + pad, subY, "lc", clip(n.sub, sf, w - pad * 2), sf, ink);
+      return;
+    }
+    if (faded) {
+      rect(r, R_NODE * s, C.bg, C.quiet, 1);
+      text(r.x0 + pad, titleY, "lc", clip(n.title, tf, w - pad * 2 - 16 * s), tf, C.faint);
+      if (two) text(r.x0 + pad, subY, "lc", clip(n.sub, sf, w - pad * 2 - 30 * s), sf, C.faint);
+      return;
+    }
+    if (sk.next === n.id) {
+      const g = 5 * s;
+      rect({ x0: r.x0 - g, y0: r.y0 - g, x1: r.x1 + g, y1: r.y1 + g }, (R_NODE + 4) * s, null, C.bone, 3);
+      text(r.x1, r.y0 - g - 3 * s, "rb", "次はここ", font(9 * s, true), C.bone);
+    }
+    rect({ x0: r.x0, y0: r.y0 + 1, x1: r.x1, y1: r.y1 + 1 }, R_NODE * s, C.shadow);
+    rect(r, R_NODE * s, tint(kind), sel ? C.bone : C.cardLine, sel ? 2 : 1, kind === "none" && !sel ? "4 3" : "");
+    text(r.x0 + pad, titleY, "lc", clip(n.title, tf, w - pad * 2), tf, C.text);
+    const work = D.working[n.id];
+    if (work) {
+      const rad = (work.focused ? 5.5 : 4.5) * s, blue = statusColor("wip");
+      if (st.lit) {
+        out.push(`<circle cx="${r.x1}" cy="${r.y0}" r="${rad * 2.2}" fill="${blue}" fill-opacity="0.18"/>`);
+        out.push(`<circle cx="${r.x1}" cy="${r.y0}" r="${rad}" fill="${blue}" stroke="${blue}" stroke-width="1.5"/>`);
+      } else out.push(`<circle cx="${r.x1}" cy="${r.y0}" r="${rad}" fill="#fff" stroke="${blue}" stroke-width="1.5"/>`);
+    }
+    if (two) {
+      text(r.x0 + pad, subY, "lc", clip(n.sub, sf, w - pad * 2 - 30 * s), sf, C.faint);
+      if (D.changes && D.changes.nodes[n.id]) text(r.x1 - pad, subY, "rc", "変化", font(8.5 * s, true), C.bone);
+    }
+    const step = stepOf(n);
+    if (step != null) {
+      const done = step <= sk.through, nf = numFont(8.5 * s), rad = Math.max(9 * s, nf.size * 0.7);
+      out.push(`<circle cx="${r.x0}" cy="${r.y0}" r="${rad}" fill="${done ? C.bone : C.card}" stroke="${C.bone}"/>`);
+      text(r.x0, r.y0, "cc", String(step), nf, done ? C.white : C.bone);
+    }
+  });
+  for (const [r, reason] of tags) {
+    const f = font(9 * s), t = clip(reason, f, r.x1 - r.x0 - 34 * s), tw = measure(t, f);
+    const b = { x0: r.x0 + 6 * s, y0: r.y0 + 3 * s, x1: r.x0 + 6 * s + tw + 22 * s, y1: r.y0 + 21 * s };
+    rect(b, 0, C.panel, C.line, 1);
+    out.push(`<circle cx="${b.x0 + 9 * s}" cy="${b.y0 + 9 * s}" r="${3 * s}" fill="${statusColor("stop")}"/>`);
+    text(b.x0 + 16 * s, b.y0 + 9 * s, "lc", t, f, C.dim);
+  }
+  for (const [s2, f, pts, own] of labels) placeLabel(crowd, s2, f, pts, own);
+  return out.join("");
+}
+
+// ---- 上の帯・下の帯 ----
+function header() {
+  document.getElementById("scope").textContent = D.scope || "全体";
+  const leg = ["live", "wip", "none", "stop"].map(k => {
+    const d = dash(k);
+    return `<span><svg width="24" height="10"><line x1="0" y1="5" x2="24" y2="5" stroke="${C.edge}" ${d ? `stroke-dasharray="${d}"` : ""}/></svg>` +
+      `<svg width="16" height="11"><rect x=".5" y=".5" width="15" height="10" rx="3" fill="${tint(k)}" stroke="${C.cardLine}" ${k === "none" ? 'stroke-dasharray="3 2"' : ""}/></svg>${short(k)}</span>`;
+  });
+  if (mode === "full") // 完成図のときだけ: 構想（塗らない点線）
+    leg.push(`<span><svg width="24" height="10"><line x1="0" y1="5" x2="24" y2="5" stroke="${FUTURE_LINE}" stroke-dasharray="${FUTURE_DASH}"/></svg>` +
+      `<svg width="16" height="11"><rect x=".5" y=".5" width="15" height="10" rx="3" fill="none" stroke="${FUTURE_LINE}" stroke-dasharray="2 2"/></svg>構想</span>`);
+  document.getElementById("legend").innerHTML = leg.join("");
+  // 今｜完成図（構想があるときだけ）
+  const md = document.getElementById("mode");
+  md.hidden = !MODES.full;
+  md.querySelectorAll("button").forEach(b => { b.classList.toggle("on", b.dataset.m === mode); b.onclick = () => setMode(b.dataset.m); });
+  document.querySelector(".help").textContent = "ドラッグで移動・ホイールで拡大・f 全体・s 骨格だけ・←→ 骨格をたどる" + (MODES.full ? "・k 完成図" : "");
+  const at = D.generated_at || "";
+  document.getElementById("meta").textContent = `${at.slice(5, 10).replace("-", "/")} ${at.slice(11, 16)} 時点の写し${D.share ? "（共有用）" : ""}`;
+  const nd = driftCount(), nc = D.changes ? Object.keys(D.changes.nodes).length : 0;
+  const dr = document.getElementById("drift"), ch = document.getElementById("changes");
+  dr.hidden = !nd; dr.textContent = `図と現物のずれ ${nd}`;
+  ch.hidden = !nc; ch.textContent = `前回から ${nc} 件`;
+  dr.onclick = () => { Object.assign(st, { list: "drift", selected: null, bundle: null }); update(); };
+  ch.onclick = () => { Object.assign(st, { list: "changes", selected: null, bundle: null }); update(); };
+}
+function strip() {
+  const el = document.getElementById("strip"), b = bones();
+  if (!b.length) { el.innerHTML = `<span class="none">骨格なし</span>`; return; }
+  const sk = through();
+  let h = owners.length > 1 ? `<span class="owner" id="owner">${esc(owner)} ›</span>` : "";
+  for (const n of b) {
+    const step = stepOf(n), done = step <= sk.through, on = st.selected === n.id;
+    const cls = ["chip", done && "done", on && "on", sk.next === n.id && !on && "next"].filter(Boolean).join(" ");
+    h += `<button class="${cls}" data-id="${esc(n.id)}" title="${esc(n.title)}"><span class="n">${step}</span><span class="t">${esc(n.title)}</span></button>`;
+  }
+  el.innerHTML = h;
+  el.querySelectorAll(".chip").forEach(x => (x.onclick = () => { select(x.dataset.id); centerOn(x.dataset.id, true); update(); }));
+  const o = document.getElementById("owner");
+  if (o) o.onclick = () => { owner = owners[(owners.indexOf(owner) + 1) % owners.length]; st.flow = null; update(); };
+}
+
+// ---- 右の欄（side.rs の写し） ----
+const gh = p => ((D.projects[p] || {}).github || "");
+const ghUrl = (github, rest) => (github ? `https://github.com/${github}/${rest}` : null);
+const linkOr = (s, url) => (url ? `<a href="${esc(url)}" target="_blank" rel="noopener">${esc(s)}</a>` : esc(s));
+const selLink = (id, s) => `<span class="sel" data-sel="${esc(id)}">${esc(s)}</span>`;
+const dotc = k => `<span class="dotc" style="color:${statusColor(k)}">●</span> `;
+const details = (title, count, open, body) =>
+  `<details ${open ? "open" : ""}><summary>${esc(title)}<span class="c">${esc(count)}</span></summary>${body}</details>`;
+
+function nodeSide(n) {
+  const d = n.detail || {}, sk = through(), kind = kindOf(n), step = stepOf(n);
+  const rows = [["説明", n.sub]];
+  const work = D.working[n.id];
+  if (work) rows.push(["作業中", work.branch]);
+  const c = D.changes && D.changes.nodes[n.id];
+  if (c) rows.push(["前回から", `${c.from ? long(c.from.status) : "新しく宣言"} → ${long(c.to.status)}${c.to.blocked ? `（${c.to.blocked}）` : ""}`]);
+  if (step != null) rows.push(["骨格", `${step} 番目${sk.next === n.id ? "（次はここ）" : ""}`]);
+  if (n.refs && n.refs.length) rows.push(["計画書", n.refs.map(r => tail(r.id) + (r.critical ? " ◆" : "")).join("、")]);
+  let h = `<h2>${esc(n.title)}</h2><div>${dotc(kind)}${esc(long(kind))}</div>`;
+  h += `<div class="rows">${rows.filter(r => r[1]).map(([k, v]) => `<span class="k">${esc(k)}</span><span>${esc(v)}</span>`).join("")}</div>`;
+  h += `<div class="lab">なぜ</div><div style="color:${n.blocked ? statusColor("stop") : C.text}">${esc(d.reason)}</div>`;
+  h += `<div class="lab">次の一手</div><div class="next">${esc(d.next)}</div>`;
+  const planned = n.refs && n.refs.length > 0;
+  if (planned) {
+    h += `<div class="lab">PR</div>`;
+    const pr = d.main_pr;
+    h += pr ? `<div>${linkOr(`#${pr.number} ${pr.title}`, ghUrl(gh(pr.project), `pull/${pr.number}`))}</div><div class="faint">　${esc(pr.why || (pr.state || "").toLowerCase())}</div>`
+            : `<div class="faint">まだ無い（PR を出すと、題の計画書の番号かカードの prs でつながる）</div>`;
+  }
+  h += `<div class="copy">${D.share ? "" : `<button class="btn" id="copy">AI に渡す文をコピー</button>`}<span class="faint">${esc((D.generated_at || "").slice(11, 16))} 時点</span></div>`;
+  if (planned) {
+    const items = d.items || [];
+    h += details("やること", items.length ? `（${d.progress}）` : "", !!n.blocked,
+      items.length ? items.map(i => `<div class="item ${i.done ? "done" : ""}">${i.done ? "■" : "□"} ${esc(i.text)}</div>`).join("")
+                   : `<div class="faint">カードにやることが無い（作業を始めたらカードの items に足す）</div>`);
+    const prs = [...(d.prs || [])].sort((a, b) => b.number - a.number);
+    h += details("PR", `（${prs.length} 本）`, false,
+      prs.length ? prs.map(p => `<div class="line" style="color:${p.state === "OPEN" ? C.text : C.faint}">${linkOr(`#${p.number}`, ghUrl(gh(p.project), `pull/${p.number}`))} ${esc((p.state || "").toLowerCase())}${p.state === "OPEN" && p.why ? `・${esc(p.why)}` : ""}　${esc(p.title)}</div>`).join("")
+                 : `<div class="faint">つながっている PR はまだ無い</div>`);
+  }
+  const mine = edges.filter(e => e.from === n.id || e.to === n.id), checked = mine.filter(e => e.note);
+  const title = id => (byId[id] || {}).title || id;
+  if (!D.share && (planned || checked.length || n.switch_note)) { // 共有用は確かめた結果を抜いてある
+    let body = "";
+    if (n.switch_note) {
+      const ok = !n.switch_note.includes("が無い");
+      body += `<div style="color:${ok ? statusColor("live") : C.error}">${ok ? "✓" : "✗"} 本番のスイッチ</div><div class="faint">　${esc(n.switch_note)}</div>`;
+    }
+    if (!checked.length && !n.switch_note) body += `<div class="faint">コードで確かめている線は無い（宣言の線に check を足すと、origin/main で確かめる）</div>`;
+    for (const e of checked) {
+      const ok = e.note.startsWith("コードで確かめた") && !e.note.includes("が無い");
+      body += `<div style="color:${ok ? statusColor("live") : C.error}">${ok ? "✓" : "✗"} ${esc(title(e.from))} → ${esc(title(e.to))}</div><div class="faint">　${esc(e.note)}</div>`;
+    }
+    h += details("確かめた結果", `（${checked.length + (n.switch_note ? 1 : 0)}）`, false, body);
+  }
+  const ins = mine.filter(e => e.to === n.id).length;
+  let body = "";
+  for (const [t, incoming] of [["入ってくる", true], ["出ていく", false]])
+    for (const e of mine.filter(e => (incoming ? e.to === n.id : e.from === n.id))) {
+      const other = incoming ? e.from : e.to;
+      body += `<div class="line">${dotc(kindOf(e))}${t}: ${selLink(other, title(other))}${e.label ? `（${esc(e.label)}）` : ""}${e.future ? "（構想）" : ""}${e.blocked ? `　${esc(e.blocked)}` : ""}</div>`;
+    }
+  h += details("つながり", `（入る ${ins}・出る ${mine.length - ins}）`, false, body);
+  if (planned) {
+    const notes = d.notes || [];
+    h += details("メモ（経緯）", "", false,
+      notes.length ? notes.map(x => `<div class="line">${esc(tail(x.ref || ""))}: ${esc(x.text)}</div>`).join("") : `<div class="faint">メモは無い</div>`);
+  }
+  h += `<div class="lab">開く</div>`;
+  const links = [];
+  for (const r of n.refs || []) {
+    const [p, num] = r.id.includes(":") ? [r.id.slice(0, r.id.indexOf(":")), tail(r.id)] : ["", r.id];
+    const plan = (D.projects[p] || {}).plan, url = plan && ghUrl(gh(p), `blob/main/${plan}`);
+    if (url) { links.push(linkOr(`計画書（${num}）`, url)); break; }
+  }
+  for (const [t, paths] of [["コード", n.paths || []], ["設計", n.docs || []]])
+    for (const p of paths) { const url = ghUrl(gh(n.project), `blob/main/${p}`); if (url) links.push(linkOr(`${t}: ${p.split("/").pop()}`, url)); }
+  h += links.length ? `<div class="links">${links.join("")}</div>` : `<div class="faint">リンクが無い（宣言に paths・docs を足すと、コードと設計へ飛べる）</div>`;
+  return h;
+}
+// 構想の部品の中身（side.rs の future_node の写し）。短く: 名前・説明・作るかは未定・出所・知らせ・つながり
+function futureSide(n) {
+  const title = id => (byId[id] || {}).title || id;
+  let h = `<h2>${esc(n.title)}</h2><div class="faint">構想（作るかは未定）</div>`;
+  if (n.sub) h += `<div style="margin-top:4px">${esc(n.sub)}</div>`;
+  if (n.note) h += `<div class="faint" style="margin-top:4px">${esc(n.note)}</div>`;
+  h += `<div class="lab">出所</div>`;
+  if (!n.source) h += `<div class="faint">書いていない（宣言の source に「&lt;パス&gt;#&lt;目印&gt;」を書く）</div>`;
+  else {
+    let path = n.source.split("#")[0], project = n.project;
+    const i = path.indexOf(":");
+    if (i > 0 && D.projects[path.slice(0, i)]) { project = path.slice(0, i); path = path.slice(i + 1); }
+    h += `<div>${linkOr(n.source, ghUrl(gh(project), `blob/main/${path}`))}</div>`;
+  }
+  const notes = [n.promote, n.source_note].filter(Boolean);
+  if (notes.length) h += `<div class="lab">知らせ</div>` + notes.map(x => `<div>${esc(x)}</div>`).join("");
+  h += `<div class="lab">つながり</div>`;
+  const mine = edges.filter(e => e.from === n.id || e.to === n.id);
+  if (!mine.length) h += `<div class="faint">線は無い</div>`;
+  for (const e of mine) {
+    const [t, other] = e.to === n.id ? ["入ってくる", e.from] : ["出ていく", e.to];
+    h += `<div class="line">${t}: ${selLink(other, title(other))}${e.label ? `（${esc(e.label)}）` : ""}</div>`;
+  }
+  return h;
+}
+function bundleSide(bi) {
+  const b = L.bundles[bi], zt = id => (zones.find(z => z.id === id) || {}).title || "";
+  let h = `<h2>${esc(zt(b.zones[0]))} と ${esc(zt(b.zones[1]))}</h2><div class="faint">${b.edges.length} 本の線をまとめている（色は中でいちばん悪い状態）</div>`;
+  for (const i of b.edges) {
+    const e = edges[i];
+    h += `<div class="line">${dotc(kindOf(e))}${selLink(e.from, (byId[e.from] || {}).title || "")} → ${selLink(e.to, (byId[e.to] || {}).title || "")}${e.label ? `（${esc(e.label)}）` : ""}${e.future ? `<span class="faint">（構想）</span>` : ""}</div>`;
+    if (e.blocked) h += `<div style="color:${statusColor("stop")}">　${esc(e.blocked)}</div>`;
+    if (e.note) h += `<div class="faint">　${esc(e.note)}</div>`;
+  }
+  return h;
+}
+function driftProjects() { return [...new Set(nodes.filter(n => !n.future).map(n => n.project))].sort(); } // 構想はずれに数えない
+function driftCount() {
+  return driftProjects().map(p => D.drift[p]).filter(Boolean)
+    .reduce((a, d) => a + (d.unclaimed || []).length + (d.missing || []).length + (d.unplanned || []).length + (d.stale_docs || []).length, 0);
+}
+function driftSide() {
+  let h = `<h2>図と現物のずれ</h2><div class="faint">見張っている場所にあるのに、どの部品の paths にも無いもの（宣言漏れ）と、paths に書いたのに origin/main に無いもの。部品の paths に足すか、宣言の ignore に足すと消える。計画書の項目でどの部品にも当たっていないもの（図に無い計画）は、部品の plan に足すか、宣言の plan_ignore に足すと消える。部品の docs の設計書が宣言より後に変わったもの（設計が変わった）は、宣言を見直して直すか、直す所が無ければ arch.json を保存し直すと消える。</div>`;
+  for (const p of driftProjects()) {
+    const d = D.drift[p];
+    if (!d) continue;
+    const [u, m, un, sd] = [d.unclaimed || [], d.missing || [], d.unplanned || [], d.stale_docs || []];
+    if (!u.length && !m.length && !un.length && !sd.length) continue;
+    h += `<div class="lab">${esc(p)}</div>`;
+    for (const f of u) h += `<div class="line">${linkOr(`宣言に無い: ${f}`, ghUrl(gh(p), `tree/main/${f}`))}</div>`;
+    for (const x of m) h += `<div class="line" style="color:${C.error}">無くなった: ${esc(x.path)}（${esc(tail(x.node))}）</div>`;
+    for (const x of un) h += `<div class="line">図に無い計画: ${esc(x.id)} ${esc(x.title)}</div>`;
+    for (const x of sd) h += `<div class="line">${linkOr(`設計が変わった: ${x.doc}（${x.nodes.map(tail).join("・")}）${x.date} ${x.subject}`, ghUrl(gh(p), `commit/${x.hash}`))}</div>`;
+  }
+  return h;
+}
+function changesSide() {
+  const ch = D.changes || { since: "", nodes: {}, skeletons: {} };
+  let h = `<h2>前回からの変化</h2><div class="faint">${esc(ch.since || "—")} の初めから、状態か待ちが変わった部品。</div>`;
+  for (const [o, k] of Object.entries(ch.skeletons || {})) h += `<div class="line">${esc(o)} の骨格: ${k.from ?? 0} 番まで → ${k.to} 番まで本番</div>`;
+  for (const id of Object.keys(ch.nodes).sort()) {
+    const c = ch.nodes[id];
+    h += `<div class="line">${esc((byId[id] || {}).title || id)}: ${esc(c.from ? long(c.from.status) : "新しく宣言")} → ${esc(long(c.to.status))}${c.to.blocked ? `（${esc(c.to.blocked)}）` : ""}</div>`;
+  }
+  return h;
+}
+let sideShown = null;
+function sidePanel() {
+  const key = JSON.stringify([st.selected, st.bundle, st.list, owner, mode]);
+  if (key === sideShown) return;
+  sideShown = key;
+  let h = "";
+  if (st.selected && byId[st.selected]) h = byId[st.selected].future ? futureSide(byId[st.selected]) : nodeSide(byId[st.selected]);
+  else if (st.bundle != null && L.bundles[st.bundle]) h = bundleSide(st.bundle);
+  else if (st.list === "drift") h = driftSide();
+  else if (st.list === "changes") h = changesSide();
+  side.classList.toggle("open", !!h);
+  side.innerHTML = h;
+  side.scrollTop = 0;
+  side.querySelectorAll("[data-sel]").forEach(x => (x.onclick = () => { select(x.dataset.sel); centerOn(x.dataset.sel, false); update(); }));
+  const cp = document.getElementById("copy");
+  if (cp) cp.onclick = () => copy(byId[st.selected].detail.ai || "");
+}
+function copy(s) {
+  const done = () => flash("AI に渡す文をコピーした");
+  const fallback = () => {
+    const t = document.createElement("textarea");
+    t.value = s; document.body.appendChild(t); t.select(); document.execCommand("copy"); t.remove(); done();
+  };
+  if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(s).then(done, fallback);
+  else fallback();
+}
+let flashTimer;
+function flash(m) {
+  const f = document.getElementById("flash");
+  f.textContent = m; f.classList.add("on");
+  clearTimeout(flashTimer); flashTimer = setTimeout(() => f.classList.remove("on"), 2000);
+}
+
+// ---- 操作 ----
+function select(id) { Object.assign(st, { selected: id, bundle: null, list: null }); }
+// 今の図と完成図を切り替える（並べ方は両方入っているので、並べ直さない）
+function setMode(m) {
+  if (!MODES[m] || m === mode) return;
+  useMode(m);
+  if (st.selected && !byId[st.selected]) st.selected = null;
+  Object.assign(st, { bundle: null, moved: false, hoverNode: null, hoverEdge: null }); // まとめた線の番号は図ごとに違う
+  header();
+  update();
+}
+function centerOn(id, always) {
+  const c = L.pos[id];
+  if (!c || !st.cam) return;
+  const [x, y] = xy(st.cam, c), r = canvasRect();
+  if (always || !(x > r.x0 + 40 && x < r.x1 - 40 && y > r.y0 + 40 && y < r.y1 - 40)) {
+    st.cam.ox += (r.x0 + r.x1) / 2 - x; st.cam.oy += (r.y0 + r.y1) / 2 - y; st.moved = true;
+  }
+}
+function hit(at) {
+  const cam = st.cam, fnode = st.hoverNode || st.selected;
+  for (let i = nodes.length - 1; i >= 0; i--) {
+    const c = L.pos[nodes[i].id];
+    if (!c) continue;
+    const r = nodeRect(cam, c);
+    if (at[0] >= r.x0 - 3 && at[0] <= r.x1 + 3 && at[1] >= r.y0 - 3 && at[1] <= r.y1 + 3) return { node: nodes[i].id };
+  }
+  const near = pts => distanceTo(pts.map(q => xy(cam, q)), at) <= 4;
+  for (let i = 0; i < edges.length; i++) {
+    const e = edges[i], shown = zoneOf[e.from] === zoneOf[e.to] || (fnode && (e.from === fnode || e.to === fnode));
+    if (shown && L.paths[i] && near(L.paths[i].points)) return { edge: i };
+  }
+  const b = L.bundles.findIndex(b => near(b.points));
+  return b >= 0 ? { bundle: b } : null;
+}
+function flowGo(d) {
+  const ids = bones().map(n => n.id);
+  if (!ids.length) return null;
+  st.flow = st.flow == null ? 0 : Math.min(Math.max(st.flow + d, 0), ids.length - 1);
+  select(ids[st.flow]);
+  centerOn(ids[st.flow], false);
+  return ids[st.flow];
+}
+function flowStep() {
+  const id = flowGo(st.flow != null ? 1 : 0);
+  if (!id) { st.playing = null; return; }
+  const n = byId[id], last = st.flow + 1 >= bones().length;
+  st.playing = n.status === "live" && !n.blocked && !last ? setTimeout(() => { flowStep(); update(); }, 1100) : null;
+}
+function flowPlay() {
+  if (st.playing) { clearTimeout(st.playing); st.playing = null; return; }
+  if (st.flow == null || st.flow + 1 >= bones().length) st.flow = null;
+  flowStep();
+}
+
+let raf = 0;
+// 位置はすぐ決め（押した所の判定がいつも今の位置で行えるように）、描くのは次の描き直しの時にまとめる
+function update() {
+  if (!st.moved || !st.cam) st.cam = fit();
+  if (raf) return;
+  raf = requestAnimationFrame(() => {
+    raf = 0;
+    sidePanel();
+    svg.innerHTML = diagram(st.cam);
+    strip();
+  });
+}
+
+const pointer = { down: null, moved: false };
+const local = ev => { const b = svg.getBoundingClientRect(); return [ev.clientX - b.left, ev.clientY - b.top]; };
+svg.addEventListener("pointerdown", ev => {
+  pointer.down = local(ev); pointer.last = pointer.down; pointer.moved = false;
+  svg.setPointerCapture(ev.pointerId);
+});
+svg.addEventListener("pointermove", ev => {
+  const at = local(ev);
+  if (pointer.down) {
+    if (!pointer.moved && Math.hypot(at[0] - pointer.down[0], at[1] - pointer.down[1]) < 3) return;
+    pointer.moved = true;
+    svg.classList.add("drag");
+    st.cam.ox += at[0] - pointer.last[0]; st.cam.oy += at[1] - pointer.last[1];
+    pointer.last = at; st.moved = true;
+    st.hoverNode = null; st.hoverEdge = null;
+    update();
+    return;
+  }
+  if (!st.cam) return;
+  const h = hit(at);
+  const [hn, he] = [h && h.node || null, h && h.edge != null ? h.edge : null];
+  svg.classList.toggle("pick", !!h);
+  if (hn !== st.hoverNode || he !== st.hoverEdge) { st.hoverNode = hn; st.hoverEdge = he; update(); }
+});
+svg.addEventListener("pointerup", ev => {
+  const was = pointer.down, moved = pointer.moved;
+  pointer.down = null; svg.classList.remove("drag");
+  if (!was || moved) return;
+  const h = hit(local(ev));
+  if (h && h.node) select(h.node);
+  else if (h && h.bundle != null) Object.assign(st, { selected: null, bundle: h.bundle, list: null });
+  else Object.assign(st, { selected: null, bundle: null });
+  update();
+});
+svg.addEventListener("pointerleave", () => { if (st.hoverNode || st.hoverEdge != null) { st.hoverNode = null; st.hoverEdge = null; update(); } });
+svg.addEventListener("wheel", ev => {
+  ev.preventDefault();
+  if (!st.cam) return;
+  const at = local(ev), notches = -(ev.deltaMode === 1 ? ev.deltaY : ev.deltaY / 100);
+  const ns = Math.min(Math.max(st.cam.scale * Math.exp(notches * 0.12), 0.25), 3);
+  st.cam.ox = at[0] - (at[0] - st.cam.ox) * ns / st.cam.scale;
+  st.cam.oy = at[1] - (at[1] - st.cam.oy) * ns / st.cam.scale;
+  st.cam.scale = ns; st.moved = true;
+  update();
+}, { passive: false });
+document.addEventListener("keydown", ev => {
+  if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
+  const k = ev.key;
+  if (k === "f") st.moved = false;
+  else if (k === "s") st.bonesOnly = !st.bonesOnly;
+  else if (k === "k") { setMode(mode === "full" ? "now" : "full"); return; }
+  else if (k === "ArrowRight") flowGo(1);
+  else if (k === "ArrowLeft") flowGo(-1);
+  else if (k === " ") { ev.preventDefault(); flowPlay(); }
+  else if (k === "Escape") {
+    if (st.playing) clearTimeout(st.playing);
+    Object.assign(st, { selected: null, bundle: null, list: null, flow: null, playing: null });
+  } else return;
+  update();
+});
+window.addEventListener("resize", () => update());
+// 作業中のライト: 灯る・消えるを BLINK ごとに入れ替える（作業中の部品があるときだけ）
+if (nodes.some(n => D.working[n.id])) setInterval(() => { st.lit = !st.lit; update(); }, BLINK);
+
+header();
+document.fonts && document.fonts.ready.then(() => update());
+update();
+</script>
+</body>
+</html>

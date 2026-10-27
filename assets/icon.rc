@@ -1,0 +1,2 @@
+// exe のアイコン（エクスプローラー・タスクバーにピン留めしたとき）。絵は assets/make_icon.py が作る
+1 ICON "icon.ico"
